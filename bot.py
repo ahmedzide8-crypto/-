@@ -887,41 +887,5 @@ app.add_handler(MessageHandler(filters.Regex(r"^📈 إحصاءات المنصّ
 app.add_handler(MessageHandler(filters.Regex(r"^ACT-[A-Z0-9]{5}$"),    handle_activation_code))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,         echo))
 
-# ────────────────────────────────────────────────────────────
-# خادم الويب — للتحقق من webhook إنستغرام
-# ────────────────────────────────────────────────────────────
-_IG_VERIFY_TOKEN = os.environ.get("IG_VERIFY_TOKEN", "")
-_flask_app = Flask(__name__)
-
-
-@_flask_app.route("/webhook", methods=["GET"])
-def _ig_verify():
-    """تحقق Meta من صحة نقطة النهاية"""
-    mode      = http_req.args.get("hub.mode")
-    token     = http_req.args.get("hub.verify_token")
-    challenge = http_req.args.get("hub.challenge", "")
-    if mode == "subscribe" and token == _IG_VERIFY_TOKEN:
-        logging.warning("[Webhook] تحقق Meta ناجح ✅")
-        return challenge, 200
-    logging.warning("[Webhook] تحقق Meta فاشل — رمز خاطئ أو وضع غير صحيح")
-    return "Forbidden", 403
-
-
-@_flask_app.route("/webhook", methods=["POST"])
-def _ig_event():
-    """استقبال أحداث إنستغرام (للمستقبل)"""
-    body = http_req.get_data(as_text=True)
-    logging.info("[Webhook] حدث إنستغرام: %s", body[:500])
-    return "OK", 200
-
-
-def _run_web_server() -> None:
-    port = int(os.environ.get("PORT", 8080))
-    logging.warning("[Webhook] خادم الويب يعمل على المنفذ %d", port)
-    _flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
-
-
-threading.Thread(target=_run_web_server, daemon=True).start()
-
 print("Bot is running...")
 app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
