@@ -910,6 +910,7 @@ def _ig_verify():
 @_flask_app.route("/webhook", methods=["POST"])
 def _ig_event():
     """استقبال أحداث إنستغرام — تحليل رسائل DM وتسجيلها"""
+    logging.warning("[IG-RAW] %s", http_req.get_data(as_text=True)[:3000])
     try:
         payload = http_req.get_json(force=True, silent=True) or {}
         for entry in payload.get("entry", []):
