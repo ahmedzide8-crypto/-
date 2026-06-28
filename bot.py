@@ -4,7 +4,7 @@ import re
 import threading
 from datetime import date as _date, time as _time
 
-from flask import Flask, request as http_req
+from flask import Flask, request as http_req, Response
 
 import database as db
 from telegram import (
@@ -930,6 +930,152 @@ def _ig_event():
     except Exception as e:
         logging.error("[IG] خطأ في تحليل الحدث: %s", e)
     return "OK", 200
+
+
+@_flask_app.route("/privacy", methods=["GET"])
+def _privacy_page():
+    html = '''<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>سياسة الخصوصية — محلي | Privacy Policy — Mahalli</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Tahoma, Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 24px; line-height: 1.8; color: #1a1a1a; background: #fff; }
+  h1 { font-size: 1.6em; border-bottom: 2px solid #2563eb; padding-bottom: 8px; }
+  h2 { font-size: 1.2em; color: #2563eb; margin-top: 28px; }
+  .en { direction: ltr; text-align: left; border-top: 3px solid #e5e7eb; margin-top: 48px; padding-top: 24px; }
+  .updated { color: #666; font-size: 0.9em; }
+  a { color: #2563eb; }
+</style>
+</head>
+<body>
+
+<h1>سياسة الخصوصية — محلي</h1>
+<p class="updated">آخر تحديث: يونيو 2026</p>
+
+<p>تطبيق "محلي" (المشار إليه بـ "الخدمة" أو "نحن") هو أداة تساعد المتاجر الصغيرة على إدارة محادثات عملائها على إنستغرام والرد عليها تلقائياً. نحترم خصوصيتك، وهذه السياسة توضّح البيانات التي نجمعها وكيف نستخدمها ونحميها.</p>
+
+<h2>البيانات التي نجمعها</h2>
+<p>عند استخدام الخدمة، قد نعالج: معرّف حساب إنستغرام الخاص بالمتجر والعميل، ونص الرسائل المُرسَلة من العميل إلى المتجر، واسم المستخدم العام، وتفاصيل الطلب التي يقدّمها العميل طوعاً (مثل الاسم ورقم الهاتف والعنوان لغرض إتمام الطلب). لا نجمع كلمات المرور أو بيانات الدفع أو أي معلومات حسّاسة أخرى.</p>
+
+<h2>كيف نستخدم البيانات</h2>
+<p>نستخدم البيانات حصراً لتشغيل الخدمة: استقبال رسائل العملاء، والرد عليها نيابةً عن المتجر، وإشعار صاحب المتجر بالطلبات والاستفسارات، وحفظ سجلّ الطلبات لمساعدة المتجر على متابعتها. لا نبيع بياناتك ولا نشاركها مع أطراف ثالثة لأغراض تسويقية.</p>
+
+<h2>مشاركة البيانات</h2>
+<p>لا نشارك بياناتك إلا مع: منصّة ميتا/إنستغرام (لاستقبال وإرسال الرسائل عبر واجهتها الرسمية)، ومزوّد الاستضافة الذي نشغّل عليه الخدمة. هذه الأطراف ملزمة بحماية البيانات.</p>
+
+<h2>الاحتفاظ بالبيانات وحذفها</h2>
+<p>نحتفظ بالبيانات طالما كان حساب المتجر نشطاً في الخدمة. يمكن لأي مستخدم طلب حذف بياناته بالكامل في أي وقت عبر زيارة صفحة حذف البيانات الخاصة بنا أو مراسلتنا. تُحذف البيانات خلال مدة معقولة من تلقّي الطلب.</p>
+
+<h2>أمن البيانات</h2>
+<p>نتّخذ إجراءات معقولة لحماية بياناتك من الوصول غير المصرّح به. نعتمد على الواجهات الرسمية المعتمدة من ميتا فقط، ولا نستخدم أي طرق غير رسمية قد تعرّض الحسابات للخطر.</p>
+
+<h2>حقوقك</h2>
+<p>لك الحق في الوصول إلى بياناتك أو تصحيحها أو طلب حذفها. للتواصل بخصوص أي من هذه الحقوق، راسلنا على البريد أدناه.</p>
+
+<h2>التواصل معنا</h2>
+<p>لأي استفسار حول هذه السياسة أو بياناتك: <a href="mailto:mahalliapp26@gmail.com">mahalliapp26@gmail.com</a></p>
+
+<div class="en">
+<h1>Privacy Policy — Mahalli</h1>
+<p class="updated">Last updated: June 2026</p>
+
+<p>Mahalli ("the Service", "we") is a tool that helps small shops manage and automatically respond to their customer conversations on Instagram. We respect your privacy. This policy explains what data we collect, and how we use and protect it.</p>
+
+<h2>Data We Collect</h2>
+<p>When you use the Service, we may process: the Instagram account IDs of the shop and the customer, the text of messages sent from the customer to the shop, public usernames, and order details voluntarily provided by the customer (such as name, phone number, and address for the purpose of completing an order). We do not collect passwords, payment data, or other sensitive information.</p>
+
+<h2>How We Use Data</h2>
+<p>We use data solely to operate the Service: receiving customer messages, replying on behalf of the shop, notifying the shop owner of orders and inquiries, and storing an order log to help the shop follow up. We do not sell your data or share it with third parties for marketing purposes.</p>
+
+<h2>Data Sharing</h2>
+<p>We only share data with: the Meta/Instagram platform (to receive and send messages via its official API), and the hosting provider on which we run the Service. These parties are obligated to protect the data.</p>
+
+<h2>Data Retention and Deletion</h2>
+<p>We retain data as long as the shop account is active in the Service. Any user may request complete deletion of their data at any time by visiting our Data Deletion page or contacting us. Data is deleted within a reasonable period of receiving the request.</p>
+
+<h2>Data Security</h2>
+<p>We take reasonable measures to protect your data from unauthorized access. We rely only on official Meta-approved APIs and do not use any unofficial methods that could put accounts at risk.</p>
+
+<h2>Your Rights</h2>
+<p>You have the right to access, correct, or request deletion of your data. To exercise any of these rights, contact us at the email below.</p>
+
+<h2>Contact Us</h2>
+<p>For any questions about this policy or your data: <a href="mailto:mahalliapp26@gmail.com">mahalliapp26@gmail.com</a></p>
+</div>
+
+</body>
+</html>'''
+    return Response(html, mimetype="text/html")
+
+
+@_flask_app.route("/data-deletion", methods=["GET"])
+def _data_deletion_page():
+    html = '''<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>حذف البيانات — محلي | Data Deletion — Mahalli</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Tahoma, Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 24px; line-height: 1.8; color: #1a1a1a; background: #fff; }
+  h1 { font-size: 1.6em; border-bottom: 2px solid #2563eb; padding-bottom: 8px; }
+  h2 { font-size: 1.2em; color: #2563eb; margin-top: 28px; }
+  .en { direction: ltr; text-align: left; border-top: 3px solid #e5e7eb; margin-top: 48px; padding-top: 24px; }
+  .updated { color: #666; font-size: 0.9em; }
+  .box { background: #f1f5f9; border-right: 4px solid #2563eb; padding: 12px 18px; margin: 16px 0; border-radius: 6px; }
+  .en .box { border-right: none; border-left: 4px solid #2563eb; }
+  a { color: #2563eb; }
+</style>
+</head>
+<body>
+
+<h1>حذف البيانات — محلي</h1>
+<p class="updated">آخر تحديث: يونيو 2026</p>
+
+<p>نحن في "محلي" نحترم حقّك في التحكّم ببياناتك. يمكنك طلب حذف جميع بياناتك المرتبطة بالخدمة في أي وقت، وبشكل مجاني.</p>
+
+<h2>ما الذي يُحذَف</h2>
+<p>عند تقديم طلب الحذف، نحذف جميع البيانات المرتبطة بحسابك، بما في ذلك: معرّفات حساب إنستغرام، ونصوص الرسائل المحفوظة، وسجلّ الطلبات والاستفسارات، وأي معلومات أخرى جمعناها أثناء تشغيل الخدمة.</p>
+
+<h2>كيف تطلب حذف بياناتك</h2>
+<div class="box">
+أرسل بريداً إلكترونياً إلى <a href="mailto:mahalliapp26@gmail.com">mahalliapp26@gmail.com</a> من البريد المرتبط بحسابك، واكتب في العنوان: "طلب حذف البيانات"، مع ذكر اسم المستخدم أو معرّف الحساب على إنستغرام.
+</div>
+<p>بعد استلام طلبك، نؤكّد هويتك، ثم نحذف بياناتك بالكامل خلال مدة لا تتجاوز 30 يوماً، ونرسل لك تأكيداً عند اكتمال الحذف.</p>
+
+<h2>ملاحظة</h2>
+<p>حذف بياناتك يعني توقّف الخدمة عن العمل لحسابك، إذ لا يمكننا تشغيل الخدمة دون البيانات الأساسية اللازمة لها.</p>
+
+<h2>التواصل معنا</h2>
+<p>لأي استفسار حول حذف البيانات: <a href="mailto:mahalliapp26@gmail.com">mahalliapp26@gmail.com</a></p>
+
+<div class="en">
+<h1>Data Deletion — Mahalli</h1>
+<p class="updated">Last updated: June 2026</p>
+
+<p>At Mahalli, we respect your right to control your data. You can request deletion of all your data associated with the Service at any time, free of charge.</p>
+
+<h2>What Gets Deleted</h2>
+<p>When you submit a deletion request, we delete all data associated with your account, including: Instagram account IDs, stored message texts, the log of orders and inquiries, and any other information we collected while operating the Service.</p>
+
+<h2>How to Request Deletion</h2>
+<div class="box">
+Send an email to <a href="mailto:mahalliapp26@gmail.com">mahalliapp26@gmail.com</a> from the email associated with your account, with the subject: "Data Deletion Request", mentioning your Instagram username or account ID.
+</div>
+<p>After receiving your request, we verify your identity, then completely delete your data within a period not exceeding 30 days, and send you a confirmation once deletion is complete.</p>
+
+<h2>Note</h2>
+<p>Deleting your data means the Service will stop working for your account, as we cannot operate the Service without the essential data it requires.</p>
+
+<h2>Contact Us</h2>
+<p>For any questions about data deletion: <a href="mailto:mahalliapp26@gmail.com">mahalliapp26@gmail.com</a></p>
+</div>
+
+</body>
+</html>'''
+    return Response(html, mimetype="text/html")
 
 
 def _run_web_server() -> None:
