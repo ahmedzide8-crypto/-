@@ -35,7 +35,7 @@ OWNER_CHAT_ID = int(os.environ["OWNER_CHAT_ID"])
 # ── إعدادات إنستغرام ─────────────────────────────────────────
 IG_ACCESS_TOKEN = os.environ.get("IG_ACCESS_TOKEN", "")
 IG_SHOP_ACCOUNT_ID = "17841452792505045"  # معرف fbiisajoke
-IG_SHOP_OWNER_TELEGRAM_ID = 760930914    # محمد، صاحب المحل التجريبي
+IG_SHOP_OWNER_TELEGRAM_ID = -760930914   # محل اختبار (معرّف سالب مثل /testclient)
 
 # ── تهيئة قاعدة البيانات ─────────────────────────────────────
 logging.basicConfig(level=logging.WARNING)
@@ -920,6 +920,25 @@ def send_instagram_message(recipient_id: str, text: str) -> bool:
         return False
 
 
+def send_telegram_message_http(chat_id: int, text: str) -> bool:
+    """إرسال رسالة تيليجرام عبر HTTP مباشرة — يعمل من خيط Flask."""
+    if not TOKEN:
+        logging.error("[TG-HTTP] TOKEN غير مضبوط")
+        return False
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code == 200:
+            logging.warning("[TG-HTTP] ✅ إشعار أُرسل لـ %s", chat_id)
+            return True
+        logging.error("[TG-HTTP] ❌ فشل (%s): %s", r.status_code, r.text[:300])
+        return False
+    except Exception as e:
+        logging.error("[TG-HTTP] ❌ استثناء: %s", e)
+        return False
+
+
 def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> None:
     """نقطة دخول رسائل إنستغرام — تطبّق منطق الزبون وترد عبر إنستغرام."""
     if recipient_id != IG_SHOP_ACCOUNT_ID:
@@ -938,7 +957,9 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
     m = _RE_PRODUCT.search(text_up)
     if m:
         code = m.group(1)
+        logging.warning("[IG-LOOKUP] أبحث عن سلعة code=%s shop_id=%s", code, shop_id)
         product = db.get_product(code)
+        logging.warning("[IG-LOOKUP] نتيجة: product=%s", product)
         if product is None or product["shop_id"] != shop_id:
             send_instagram_message(sender_id, "لم أجد هذا الكود، تأكّد منه.")
             return
@@ -977,15 +998,33 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
             f"العنوان: {address or '—'} | السلعة: {product_code or '—'} | "
             f"المصدر: إنستغرام ({sender_id})"
         )
+        logging.warning("[IG-NOTIF] أحفظ إشعار لـ shop_id=%s kind=order", shop_id)
         db.add_notification(shop_id, "order", notif, None)
-        # لا يمكن إرسال إشعار تيليجرام متزامن من هنا (خادم Flask مستقل عن
-        # حلقة asyncio لتيليجرام) — يظهر الإشعار لصاحب المحل عبر 🔔 الإشعارات.
+        logging.warning("[IG-NOTIF] ✅ حُفظ الإشعار")
+        # إشعار فوري لصاحب المحل عبر تيليجرام HTTP
+        real_chat = abs(shop_id)
+        notif_msg = (
+            f"🛒 طلب جديد من إنستغرام\n"
+            f"السلعة: {product_code or '—'}\n"
+            f"الاسم: {name or '—'}\n"
+            f"الهاتف: {phone or '—'}\n"
+            f"العنوان: {address or '—'}\n"
+            f"معرّف الزبون (IG): {sender_id}"
+        )
+        send_telegram_message_http(real_chat, notif_msg)
         send_instagram_message(sender_id, "تم استلام طلبك ✅ سيتواصل معك المحل قريباً.")
         logging.warning("[IG] طلب جديد محفوظ: order_id=%s", order_id)
         return
 
     # استفسار عام
+    real_chat = abs(shop_id)
+    logging.warning("[IG-NOTIF] أحفظ إشعار لـ shop_id=%s kind=inquiry", shop_id)
     db.add_notification(shop_id, "inquiry", f"[إنستغرام {sender_id}] {text_stripped}", None)
+    logging.warning("[IG-NOTIF] ✅ حُفظ الإشعار")
+    send_telegram_message_http(
+        real_chat,
+        f"❓ استفسار من إنستغرام\n{text_stripped}\nمعرّف الزبون (IG): {sender_id}"
+    )
     send_instagram_message(sender_id, "تم إرسال سؤالك للمحل.")
 
 
@@ -1191,3 +1230,4 @@ threading.Thread(target=_run_web_server, daemon=True).start()
 
 print("Bot is running...")
 app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
