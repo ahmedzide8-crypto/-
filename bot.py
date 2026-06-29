@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import threading
+import requests
 from datetime import date as _date, time as _time
 
 from flask import Flask, request as http_req, Response
@@ -30,6 +31,11 @@ from telegram.ext import (
 TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 assert TOKEN, "يجب ضبط BOT_TOKEN أو TELEGRAM_BOT_TOKEN"
 OWNER_CHAT_ID = int(os.environ["OWNER_CHAT_ID"])
+
+# ── إعدادات إنستغرام ─────────────────────────────────────────
+IG_ACCESS_TOKEN = os.environ.get("IG_ACCESS_TOKEN", "")
+IG_SHOP_ACCOUNT_ID = "17841452792505045"  # معرف fbiisajoke
+IG_SHOP_OWNER_TELEGRAM_ID = 760930914    # محمد، صاحب المحل التجريبي
 
 # ── تهيئة قاعدة البيانات ─────────────────────────────────────
 logging.basicConfig(level=logging.WARNING)
@@ -888,6 +894,102 @@ app.add_handler(MessageHandler(filters.Regex(r"^ACT-[A-Z0-9]{5}$"),    handle_ac
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,         echo))
 
 # ────────────────────────────────────────────────────────────
+# ردّ تلقائي على رسائل إنستغرام
+# ────────────────────────────────────────────────────────────
+def send_instagram_message(recipient_id: str, text: str) -> bool:
+    """إرسال رسالة عبر واجهة إنستغرام الرسمية. يُرجع True عند النجاح."""
+    if not IG_ACCESS_TOKEN:
+        logging.error("[IG-SEND] IG_ACCESS_TOKEN غير مضبوط")
+        return False
+    url = f"https://graph.instagram.com/v25.0/{IG_SHOP_ACCOUNT_ID}/messages"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": text},
+        "access_token": IG_ACCESS_TOKEN,
+    }
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        if r.status_code == 200:
+            logging.warning("[IG-SEND] ✅ رسالة أُرسلت إلى %s", recipient_id)
+            return True
+        logging.error("[IG-SEND] ❌ فشل (%s): %s", r.status_code, r.text[:300])
+        return False
+    except Exception as e:
+        logging.error("[IG-SEND] ❌ استثناء: %s", e)
+        return False
+
+
+def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> None:
+    """نقطة دخول رسائل إنستغرام — تطبّق منطق الزبون وترد عبر إنستغرام."""
+    if recipient_id != IG_SHOP_ACCOUNT_ID:
+        logging.warning("[IG] رسالة لمستلم غير معروف: %s", recipient_id)
+        return
+    shop_id = IG_SHOP_OWNER_TELEGRAM_ID
+    text_stripped = text.strip()
+    text_up = text_stripped.upper()
+
+    # تحية
+    if _RE_GREETING.match(text_stripped):
+        send_instagram_message(sender_id, "أهلاً وسهلاً 👋\nأرسل كود السلعة التي تريد الاستفسار عنها.")
+        return
+
+    # كود سلعة
+    m = _RE_PRODUCT.search(text_up)
+    if m:
+        code = m.group(1)
+        product = db.get_product(code)
+        if product is None or product["shop_id"] != shop_id:
+            send_instagram_message(sender_id, "لم أجد هذا الكود، تأكّد منه.")
+            return
+        # احفظ آخر سلعة بربط معرف الزبون على إنستغرام كمعرّف وهمي سالب
+        try:
+            fake_uid = -int(sender_id) if sender_id.isdigit() else None
+        except Exception:
+            fake_uid = None
+        if fake_uid is not None:
+            db.set_admin_last_product(fake_uid, code)
+        sizes = ", ".join(product["sizes"])
+        send_instagram_message(sender_id,
+            f"📦 {product['name']}\n"
+            f"💰 السعر: {product['price']}\n"
+            f"📐 القياسات: {sizes}\n"
+            f"📌 الحالة: متوفر"
+        )
+        send_instagram_message(sender_id, "لو حابب تطلب، أرسل:\nالاسم / رقم الهاتف / العنوان")
+        return
+
+    # رقم هاتف = طلب
+    if _RE_PHONE.search(text_stripped):
+        name, phone, address = _parse_order(text_stripped)
+        # استرجاع آخر سلعة من قاعدة البيانات
+        product_code = ""
+        try:
+            fake_uid = -int(sender_id) if sender_id.isdigit() else None
+            if fake_uid is not None:
+                st = db.get_admin_mode(fake_uid)
+                product_code = st.get("last_product") or ""
+        except Exception:
+            pass
+        order_id = db.add_order(shop_id, product_code, name, phone, address, None)
+        notif = (
+            f"الاسم: {name or '—'} | الهاتف: {phone or '—'} | "
+            f"العنوان: {address or '—'} | السلعة: {product_code or '—'} | "
+            f"المصدر: إنستغرام ({sender_id})"
+        )
+        db.add_notification(shop_id, "order", notif, None)
+        # لا يمكن إرسال إشعار تيليجرام متزامن من هنا (خادم Flask مستقل عن
+        # حلقة asyncio لتيليجرام) — يظهر الإشعار لصاحب المحل عبر 🔔 الإشعارات.
+        send_instagram_message(sender_id, "تم استلام طلبك ✅ سيتواصل معك المحل قريباً.")
+        logging.warning("[IG] طلب جديد محفوظ: order_id=%s", order_id)
+        return
+
+    # استفسار عام
+    db.add_notification(shop_id, "inquiry", f"[إنستغرام {sender_id}] {text_stripped}", None)
+    send_instagram_message(sender_id, "تم إرسال سؤالك للمحل.")
+
+
+# ────────────────────────────────────────────────────────────
 # خادم الويب — للتحقق من webhook إنستغرام
 # ────────────────────────────────────────────────────────────
 _IG_VERIFY_TOKEN = os.environ.get("IG_VERIFY_TOKEN", "")
@@ -924,6 +1026,7 @@ def _ig_event():
                 text = msg.get("text")
                 if text:
                     logging.warning("[IG] رسالة من %s إلى %s: %s", sender_id, recipient_id, text)
+                    handle_instagram_message(sender_id, recipient_id, text)
                 else:
                     # صورة أو إعجاب أو نوع آخر
                     logging.info("[IG] حدث غير نصي من %s (mid=%s)", sender_id, msg.get("mid", "—"))
