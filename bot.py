@@ -1016,6 +1016,27 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
         logging.warning("[IG] طلب جديد محفوظ: order_id=%s", order_id)
         return
 
+    # كشف طلب التحدث مع إنسان (يُفحص قبل اعتباره استفساراً عاماً)
+    human_keywords = ["تحدث مع إنسان", "اتكلم مع انسان", "اريد انسان", "أريد إنسان",
+                      "مع انسان", "مع إنسان", "human", "agent", "صاحب المحل",
+                      "كلم صاحب", "اكلم صاحب"]
+    text_lower = text_stripped.lower()
+    if any(kw.lower() in text_lower for kw in human_keywords):
+        real_chat = abs(shop_id)
+        notif_msg = (
+            f"🆘 طلب تحدث مع إنسان\n"
+            f"الزبون يطلب التحدث معك مباشرة عبر إنستغرام.\n"
+            f"معرّف الزبون (IG): {sender_id}\n"
+            f"الرسالة: {text_stripped}"
+        )
+        send_telegram_message_http(real_chat, notif_msg)
+        db.add_notification(shop_id, "inquiry", f"🆘 [طلب إنسان] {text_stripped}", None)
+        send_instagram_message(sender_id,
+            "تم تنبيه صاحب المحل وسيتواصل معك مباشرة في أقرب وقت ممكن 🙏\n"
+            "شكراً لصبرك."
+        )
+        return
+
     # استفسار عام
     real_chat = abs(shop_id)
     logging.warning("[IG-NOTIF] أحفظ إشعار لـ shop_id=%s kind=inquiry", shop_id)
@@ -1025,7 +1046,13 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
         real_chat,
         f"❓ استفسار من إنستغرام\n{text_stripped}\nمعرّف الزبون (IG): {sender_id}"
     )
-    send_instagram_message(sender_id, "تم إرسال سؤالك للمحل.")
+    send_instagram_message(sender_id,
+        "شكراً لتواصلك معنا 🙏\n"
+        "سؤالك وصل لصاحب المحل وسيرد عليك في أقرب وقت.\n\n"
+        "في هذي الأثناء يمكنك:\n"
+        "• إرسال كود السلعة لمعرفة تفاصيلها وسعرها (مثل: AB-1234)\n"
+        "• كتابة (تحدث مع إنسان) للتواصل المباشر مع صاحب المحل"
+    )
 
 
 # ────────────────────────────────────────────────────────────
