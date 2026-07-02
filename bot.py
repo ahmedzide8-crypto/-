@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import threading
+import time
 import requests
 from datetime import date as _date, time as _time
 
@@ -939,11 +940,43 @@ def send_telegram_message_http(chat_id: int, text: str) -> bool:
         return False
 
 
+# تتبّع الزبائن الذين طلبوا التحدث مع إنسان لإسكات البوت لمدة 24 ساعة
+# المفتاح: sender_id (str)، القيمة: timestamp عند الطلب (int)
+_HUMAN_HANDOFF_TS: dict = {}
+_HUMAN_HANDOFF_DURATION = 24 * 60 * 60  # 24 ساعة بالثواني
+
+
 def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> None:
     """نقطة دخول رسائل إنستغرام — تطبّق منطق الزبون وترد عبر إنستغرام."""
     if recipient_id != IG_SHOP_ACCOUNT_ID:
         logging.warning("[IG] رسالة لمستلم غير معروف: %s", recipient_id)
         return
+    # فحص: هل هذا الزبون في وضع الإسكات (طلب التحدث مع إنسان خلال 24 ساعة الماضية)؟
+    _now_ts = int(time.time())
+    _handoff_ts = _HUMAN_HANDOFF_TS.get(sender_id)
+    if _handoff_ts is not None:
+        _elapsed = _now_ts - _handoff_ts
+        if _elapsed < _HUMAN_HANDOFF_DURATION:
+            _remaining_hrs = (_HUMAN_HANDOFF_DURATION - _elapsed) // 3600
+            logging.warning(
+                "[IG-SILENCE] تجاهل رسالة من %s (تبقى %s ساعة على انتهاء الإسكات): %s",
+                sender_id, _remaining_hrs, text.strip()[:100]
+            )
+            db.add_notification(
+                IG_SHOP_OWNER_TELEGRAM_ID,
+                "inquiry",
+                f"📩 [أثناء الإسكات — الزبون طلب التحدث مع إنسان] {text.strip()}",
+                None
+            )
+            send_telegram_message_http(
+                abs(IG_SHOP_OWNER_TELEGRAM_ID),
+                f"📩 رسالة جديدة من زبون في وضع التحدث مع إنسان:\n{text.strip()}\n"
+                f"معرّف الزبون (IG): {sender_id}"
+            )
+            return
+        else:
+            _HUMAN_HANDOFF_TS.pop(sender_id, None)
+            logging.warning("[IG-SILENCE] انتهت مدة الإسكات للزبون %s، عودة للرد التلقائي", sender_id)
     shop_id = IG_SHOP_OWNER_TELEGRAM_ID
     text_stripped = text.strip()
     text_up = text_stripped.upper()
@@ -1031,6 +1064,8 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
         )
         send_telegram_message_http(real_chat, notif_msg)
         db.add_notification(shop_id, "inquiry", f"🆘 [طلب إنسان] {text_stripped}", None)
+        _HUMAN_HANDOFF_TS[sender_id] = int(time.time())
+        logging.warning("[IG-SILENCE] تم إسكات البوت للزبون %s لمدة 24 ساعة", sender_id)
         send_instagram_message(sender_id,
             "تم تنبيه صاحب المحل وسيتواصل معك مباشرة في أقرب وقت ممكن 🙏\n"
             "شكراً لصبرك."
@@ -1257,4 +1292,3 @@ threading.Thread(target=_run_web_server, daemon=True).start()
 
 print("Bot is running...")
 app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-
