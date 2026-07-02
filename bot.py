@@ -38,6 +38,15 @@ IG_ACCESS_TOKEN = os.environ.get("IG_ACCESS_TOKEN", "")
 IG_SHOP_ACCOUNT_ID = "17841452792505045"  # معرف fbiisajoke
 IG_SHOP_OWNER_TELEGRAM_ID = -760930914   # محل اختبار (معرّف سالب مثل /testclient)
 
+IG_SHOP2_ACCOUNT_ID = os.environ.get("IG_SHOP2_ACCOUNT_ID", "")
+IG_SHOP2_ACCESS_TOKEN = os.environ.get("IG_SHOP2_ACCESS_TOKEN", "")
+
+IG_SHOPS = {
+    IG_SHOP_ACCOUNT_ID: {"token": IG_ACCESS_TOKEN, "owner": IG_SHOP_OWNER_TELEGRAM_ID},
+}
+if IG_SHOP2_ACCOUNT_ID and IG_SHOP2_ACCESS_TOKEN:
+    IG_SHOPS[IG_SHOP2_ACCOUNT_ID] = {"token": IG_SHOP2_ACCESS_TOKEN, "owner": IG_SHOP_OWNER_TELEGRAM_ID}
+
 # ── تهيئة قاعدة البيانات ─────────────────────────────────────
 logging.basicConfig(level=logging.WARNING)
 db.init_db()
@@ -897,17 +906,17 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,         echo))
 # ────────────────────────────────────────────────────────────
 # ردّ تلقائي على رسائل إنستغرام
 # ────────────────────────────────────────────────────────────
-def send_instagram_message(recipient_id: str, text: str) -> bool:
+def _send_instagram_message_raw(account_id: str, token: str, recipient_id: str, text: str) -> bool:
     """إرسال رسالة عبر واجهة إنستغرام الرسمية. يُرجع True عند النجاح."""
-    if not IG_ACCESS_TOKEN:
-        logging.error("[IG-SEND] IG_ACCESS_TOKEN غير مضبوط")
+    if not token:
+        logging.error("[IG-SEND] token غير مضبوط")
         return False
-    url = f"https://graph.instagram.com/v25.0/{IG_SHOP_ACCOUNT_ID}/messages"
+    url = f"https://graph.instagram.com/v25.0/{account_id}/messages"
     headers = {"Content-Type": "application/json"}
     payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": text},
-        "access_token": IG_ACCESS_TOKEN,
+        "access_token": token,
     }
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=10)
@@ -919,6 +928,11 @@ def send_instagram_message(recipient_id: str, text: str) -> bool:
     except Exception as e:
         logging.error("[IG-SEND] ❌ استثناء: %s", e)
         return False
+
+
+def send_instagram_message(recipient_id: str, text: str) -> bool:
+    """توافقية: يرسل من حساب المحل الافتراضي (fbiisajoke)."""
+    return _send_instagram_message_raw(IG_SHOP_ACCOUNT_ID, IG_ACCESS_TOKEN, recipient_id, text)
 
 
 def send_telegram_message_http(chat_id: int, text: str) -> bool:
@@ -948,9 +962,16 @@ _HUMAN_HANDOFF_DURATION = 24 * 60 * 60  # 24 ساعة بالثواني
 
 def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> None:
     """نقطة دخول رسائل إنستغرام — تطبّق منطق الزبون وترد عبر إنستغرام."""
-    if recipient_id != IG_SHOP_ACCOUNT_ID:
+    shop = IG_SHOPS.get(recipient_id)
+    if shop is None:
         logging.warning("[IG] رسالة لمستلم غير معروف: %s", recipient_id)
         return
+    shop_account_id = recipient_id
+    shop_token = shop["token"]
+
+    def send_instagram_message(recipient_id: str, text: str) -> bool:
+        return _send_instagram_message_raw(shop_account_id, shop_token, recipient_id, text)
+
     # فحص: هل هذا الزبون في وضع الإسكات (طلب التحدث مع إنسان خلال 24 ساعة الماضية)؟
     _now_ts = int(time.time())
     _handoff_ts = _HUMAN_HANDOFF_TS.get(sender_id)
@@ -963,13 +984,13 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
                 sender_id, _remaining_hrs, text.strip()[:100]
             )
             db.add_notification(
-                IG_SHOP_OWNER_TELEGRAM_ID,
+                shop["owner"],
                 "inquiry",
                 f"📩 [أثناء الإسكات — الزبون طلب التحدث مع إنسان] {text.strip()}",
                 None
             )
             send_telegram_message_http(
-                abs(IG_SHOP_OWNER_TELEGRAM_ID),
+                abs(shop["owner"]),
                 f"📩 رسالة جديدة من زبون في وضع التحدث مع إنسان:\n{text.strip()}\n"
                 f"معرّف الزبون (IG): {sender_id}"
             )
@@ -977,7 +998,7 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
         else:
             _HUMAN_HANDOFF_TS.pop(sender_id, None)
             logging.warning("[IG-SILENCE] انتهت مدة الإسكات للزبون %s، عودة للرد التلقائي", sender_id)
-    shop_id = IG_SHOP_OWNER_TELEGRAM_ID
+    shop_id = shop["owner"]
     text_stripped = text.strip()
     text_up = text_stripped.upper()
 
