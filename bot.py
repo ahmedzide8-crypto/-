@@ -35,17 +35,20 @@ OWNER_CHAT_ID = int(os.environ["OWNER_CHAT_ID"])
 
 # ── إعدادات إنستغرام ─────────────────────────────────────────
 IG_ACCESS_TOKEN = os.environ.get("IG_ACCESS_TOKEN", "")
-IG_SHOP_ACCOUNT_ID = "17841452792505045"  # معرف fbiisajoke
+IG_SHOP_ACCOUNT_ID = "17841452792505045"  # معرف fbiisajoke كما يظهر بالـ webhook
+IG_SHOP_SEND_ACCOUNT_ID = os.environ.get("IG_SHOP_SEND_ACCOUNT_ID", IG_SHOP_ACCOUNT_ID)  # المعرف الحقيقي المرتبط بالتوكن للإرسال
 IG_SHOP_OWNER_TELEGRAM_ID = -760930914   # محل اختبار (معرّف سالب مثل /testclient)
 
 IG_SHOP2_ACCOUNT_ID = os.environ.get("IG_SHOP2_ACCOUNT_ID", "")
 IG_SHOP2_ACCESS_TOKEN = os.environ.get("IG_SHOP2_ACCESS_TOKEN", "")
+IG_SHOP2_SEND_ACCOUNT_ID = os.environ.get("IG_SHOP2_SEND_ACCOUNT_ID", IG_SHOP2_ACCOUNT_ID)
 
 IG_SHOPS = {
-    IG_SHOP_ACCOUNT_ID: {"token": IG_ACCESS_TOKEN, "owner": IG_SHOP_OWNER_TELEGRAM_ID},
+    IG_SHOP_ACCOUNT_ID: {"token": IG_ACCESS_TOKEN, "owner": IG_SHOP_OWNER_TELEGRAM_ID, "send_id": IG_SHOP_SEND_ACCOUNT_ID},
 }
 if IG_SHOP2_ACCOUNT_ID and IG_SHOP2_ACCESS_TOKEN:
-    IG_SHOPS[IG_SHOP2_ACCOUNT_ID] = {"token": IG_SHOP2_ACCESS_TOKEN, "owner": IG_SHOP_OWNER_TELEGRAM_ID}
+    IG_SHOPS[IG_SHOP2_ACCOUNT_ID] = {"token": IG_SHOP2_ACCESS_TOKEN, "owner": IG_SHOP_OWNER_TELEGRAM_ID, "send_id": IG_SHOP2_SEND_ACCOUNT_ID}
+
 
 # ── تهيئة قاعدة البيانات ─────────────────────────────────────
 logging.basicConfig(level=logging.WARNING)
@@ -966,7 +969,7 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
     if shop is None:
         logging.warning("[IG] رسالة لمستلم غير معروف: %s", recipient_id)
         return
-    shop_account_id = recipient_id
+    shop_account_id = shop["send_id"]
     shop_token = shop["token"]
 
     def send_instagram_message(recipient_id: str, text: str) -> bool:
