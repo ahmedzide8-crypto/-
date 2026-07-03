@@ -624,9 +624,12 @@ def get_ig_shop_by_webhook_id(webhook_account_id: str) -> Optional[dict]:
     with _conn() as con:
         row = con.execute(
             "SELECT * FROM ig_shops WHERE webhook_account_id = ? AND status = 'active'",
-            (webhook_account_id,)
+            (webhook_account_id,),
         ).fetchone()
-        return dict(row) if row else None
+
+    print("SHOP_ROW =", dict(row) if row else None)
+
+    return dict(row) if row else None
 
 
 def get_ig_shop_by_send_account_id(send_account_id: str) -> Optional[dict]:
