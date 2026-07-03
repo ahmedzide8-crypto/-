@@ -1064,43 +1064,52 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
     # كود سلعة
     m = _RE_PRODUCT.search(text_up)
     if m:
-       code = m.group(1)
-logging.warning("code=%s", code)
+        code = m.group(1)
+        logging.warning("code=%s", code)
 
-product = db.get_product(code)
-logging.warning("product=%s", product)
+        product = db.get_product(code)
+        logging.warning("product=%s", product)
 
-logging.warning("current_shop=%s", shop_id)
+        logging.warning("current_shop=%s", shop_id)
 
-if product:
-    logging.warning("product_shop=%s", product["shop_id"])
+        if product:
+            logging.warning("product_shop=%s", product["shop_id"])
 
-if product is None or product["shop_id"] != shop_id:
-    _send_instagram_message_raw(
-        send_account_id,
-        ig_token,
-        sender_id,
-        "لم أجد هذا الكود، تأكد منه."
-    )
-   return
+        if product is None or product["shop_id"] != shop_id:
+            _send_instagram_message_raw(
+                send_account_id,
+                ig_token,
+                sender_id,
+                "لم أجد هذا الكود، تأكد منه."
+            )
+            return
 
-# احفظ آخر سلعة...
-try:
-    fake_uid = -int(sender_id) if sender_id.isdigit() else None
-except Exception:
-    fake_uid = None
+        # احفظ آخر سلعة
+        try:
+            fake_uid = -int(sender_id) if sender_id.isdigit() else None
+        except Exception:
+            fake_uid = None
 
-if fake_uid is not None:
-    db.set_admin_last_product(fake_uid, code)
+        if fake_uid is not None:
+            db.set_admin_last_product(fake_uid, code)
+
         sizes = ", ".join(product["sizes"])
-        _send_instagram_message_raw(send_account_id, ig_token, sender_id,
+        _send_instagram_message_raw(
+            send_account_id,
+            ig_token,
+            sender_id,
             f"📦 {product['name']}\n"
             f"💰 السعر: {product['price']}\n"
             f"📐 القياسات: {sizes}\n"
             f"📌 الحالة: متوفر"
         )
-        _send_instagram_message_raw(send_account_id, ig_token, sender_id,
-                                    "لو حابب تطلب، أرسل:\nالاسم / رقم الهاتف / العنوان")
+
+        _send_instagram_message_raw(
+            send_account_id,
+            ig_token,
+            sender_id,
+            "لو حابب تطلب، أرسل:\nالاسم / رقم الهاتف / العنوان"
+        )
         return
 
     # رقم هاتف = طلب
@@ -1483,4 +1492,5 @@ threading.Thread(target=_run_web_server, daemon=True).start()
 
 print("Bot is running...")
 app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
 
