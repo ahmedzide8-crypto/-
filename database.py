@@ -100,6 +100,17 @@ def init_db() -> None:
                 test_shop_id INTEGER,
                 last_product TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS ig_shops (
+                webhook_account_id  TEXT    PRIMARY KEY,
+                send_account_id     TEXT    NOT NULL,
+                access_token        TEXT    NOT NULL,
+                token_expires_at    INTEGER NOT NULL,
+                owner_telegram_id   INTEGER NOT NULL,
+                username            TEXT    DEFAULT '',
+                created_at          INTEGER NOT NULL,
+                status              TEXT    NOT NULL DEFAULT 'active'
+            );
         """)
 
         # أضف الأعمدة الجديدة آمناً على قواعد بيانات قائمة
@@ -575,3 +586,149 @@ def get_shop_orders(shop_id: int) -> list:
             (shop_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ────────────────────────────────────────────────────────────
+# Instagram shops registry
+# ────────────────────────────────────────────────────────────
+def add_ig_shop(
+    webhook_account_id: str,
+    send_account_id: str,
+    access_token: str,
+    token_expires_at: int,
+    owner_telegram_id: int,
+    username: str = "",
+) -> None:
+    """UPSERT an Instagram shop row."""
+    import time as _t
+    now = int(_t.time())
+    with _conn() as con:
+        con.execute("""
+            INSERT INTO ig_shops
+                (webhook_account_id, send_account_id, access_token, token_expires_at,
+                 owner_telegram_id, username, created_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+            ON CONFLICT(webhook_account_id) DO UPDATE SET
+                send_account_id  = excluded.send_account_id,
+                access_token     = excluded.access_token,
+                token_expires_at = excluded.token_expires_at,
+                owner_telegram_id= excluded.owner_telegram_id,
+                username         = excluded.username,
+                status           = 'active'
+        """, (webhook_account_id, send_account_id, access_token,
+              token_expires_at, owner_telegram_id, username, now))
+
+
+def get_ig_shop_by_webhook_id(webhook_account_id: str) -> Optional[dict]:
+    """Look up an active IG shop by the recipient.id seen in webhook events."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM ig_shops WHERE webhook_account_id = ? AND status = 'active'",
+            (webhook_account_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_ig_shop_by_send_account_id(send_account_id: str) -> Optional[dict]:
+    """Fallback lookup by send_account_id — used for self-healing webhook ID mismatch."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM ig_shops WHERE send_account_id = ? AND status = 'active'",
+            (send_account_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_ig_shop_by_owner(owner_telegram_id: int) -> Optional[dict]:
+    """Find an active IG shop by the owner's Telegram chat ID."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM ig_shops WHERE owner_telegram_id = ? AND status = 'active'",
+            (owner_telegram_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_ig_shop_token(webhook_account_id: str, access_token: str, expires_at: int) -> None:
+    """Persist a refreshed long-lived token."""
+    with _conn() as con:
+        con.execute(
+            "UPDATE ig_shops SET access_token = ?, token_expires_at = ? "
+            "WHERE webhook_account_id = ?",
+            (access_token, expires_at, webhook_account_id)
+        )
+
+
+def update_ig_shop_webhook_id(old_webhook_id: str, new_webhook_id: str) -> None:
+    """Self-heal: correct the stored webhook_account_id when IG reports a different one."""
+    with _conn() as con:
+        con.execute(
+            "UPDATE ig_shops SET webhook_account_id = ? WHERE webhook_account_id = ?",
+            (new_webhook_id, old_webhook_id)
+        )
+
+
+def list_ig_shops_expiring_before(timestamp: int) -> list:
+    """Return active IG shops whose token expires before the given unix timestamp."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM ig_shops WHERE status = 'active' AND token_expires_at < ?",
+            (timestamp,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def seed_ig_shops_from_env() -> None:
+    """One-time migration: seed ig_shops from env vars if the table is empty.
+    Reads IG_SHOP_ACCOUNT_ID / IG_ACCESS_TOKEN / IG_SHOP_SEND_ACCOUNT_ID /
+    IG_SHOP_OWNER_TELEGRAM_ID and the IG_SHOP2_* equivalents.
+    Idempotent — safe to call on every startup."""
+    with _conn() as con:
+        if con.execute("SELECT COUNT(*) FROM ig_shops").fetchone()[0] > 0:
+            return
+
+    import time as _t
+    now = int(_t.time())
+    default_expires = now + 60 * 86400  # 60-day estimate
+
+    candidates = [
+        (
+            os.environ.get("IG_SHOP_ACCOUNT_ID", ""),
+            os.environ.get("IG_SHOP_SEND_ACCOUNT_ID", ""),
+            os.environ.get("IG_ACCESS_TOKEN", ""),
+            os.environ.get("IG_SHOP_OWNER_TELEGRAM_ID", ""),
+        ),
+        (
+            os.environ.get("IG_SHOP2_ACCOUNT_ID", ""),
+            os.environ.get("IG_SHOP2_SEND_ACCOUNT_ID", ""),
+            os.environ.get("IG_SHOP2_ACCESS_TOKEN", ""),
+            os.environ.get("IG_SHOP2_OWNER_TELEGRAM_ID", ""),
+        ),
+    ]
+
+    seeded = 0
+    for webhook_id, send_id, token, owner_raw in candidates:
+        if not (webhook_id and token and owner_raw):
+            continue
+        try:
+            owner_tg = int(owner_raw)  # preserve sign: negative = test shop
+        except ValueError:
+            logging.error("[IG-SEED] Invalid owner Telegram ID: %s", owner_raw)
+            continue
+        effective_send = send_id or webhook_id
+        with _conn() as con:
+            con.execute("""
+                INSERT OR IGNORE INTO ig_shops
+                    (webhook_account_id, send_account_id, access_token, token_expires_at,
+                     owner_telegram_id, username, created_at, status)
+                VALUES (?, ?, ?, ?, ?, '', ?, 'active')
+            """, (webhook_id, effective_send, token, default_expires, owner_tg, now))
+        logging.warning("[IG-SEED] Seeded ig_shop: webhook_id=%s owner_tg=%s",
+                        webhook_id, owner_tg)
+        seeded += 1
+
+    if seeded == 0:
+        logging.warning(
+            "[IG-SEED] No shops seeded — set IG_SHOP_ACCOUNT_ID, "
+            "IG_ACCESS_TOKEN, IG_SHOP_OWNER_TELEGRAM_ID in Railway"
+        )
