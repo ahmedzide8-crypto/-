@@ -244,7 +244,7 @@ async def deleteinfo(update: Update, _context: ContextTypes.DEFAULT_TYPE):
 
 async def ig_connect(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     """🔗 ربط إنستغرام — يولّد رابط OAuth ويرسله لصاحب المحل"""
-    real_uid = update.effective_chat.id
+    real_uid = _eff_uid(update, _context)
     if not can_manage(real_uid):
         await _deny_pending(update, _context)
         return
@@ -1469,3 +1469,4 @@ threading.Thread(target=_run_web_server, daemon=True).start()
 
 print("Bot is running...")
 app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
