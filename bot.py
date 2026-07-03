@@ -1391,7 +1391,7 @@ def _ig_oauth_callback():
             timeout=15,
         )
         logging.warning("[IG-OAUTH] رد Meta لاستبدال code: status=%s body=%s", r1.status_code, r1.text)
-         r1.raise_for_status()
+        r1.raise_for_status()
         short_data  = r1.json()
         short_token = short_data["access_token"]
         send_account_id = str(short_data["user_id"])
