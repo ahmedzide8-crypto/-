@@ -225,6 +225,20 @@ async def testcustomer(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def activatereal(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    """/activatereal — فعّل حساب الأدمن الحقيقي كمحل فعلي بلا انتهاء"""
+    uid = update.effective_chat.id
+    if not db.is_admin(uid):
+        return
+    username = update.effective_user.username
+    db.add_shop(uid, username)
+    db.set_shop_active_unlimited(uid)
+    await update.message.reply_text(
+        "✅ تم تفعيل حسابك الحقيقي كمحل فعلي بلا تاريخ انتهاء.",
+        reply_markup=OWNER_KB,
+    )
+
+
 async def exittest(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     """/exittest — خروج من أي وضع اختبار بلا حذف بيانات"""
     if not db.is_admin(update.effective_chat.id):
@@ -935,6 +949,7 @@ app.add_handler(CommandHandler("list",         list_products))
 app.add_handler(CommandHandler("testclient",   testclient))
 app.add_handler(CommandHandler("testcustomer", testcustomer))
 app.add_handler(CommandHandler("exittest",     exittest))
+app.add_handler(CommandHandler("activatereal", activatereal))
 app.add_handler(CommandHandler("deleteinfo",   deleteinfo))
 app.add_handler(CommandHandler("whoami",       whoami))
 # callbacks التفعيل: dur_ / gen_ / back_
@@ -1492,5 +1507,3 @@ threading.Thread(target=_run_web_server, daemon=True).start()
 
 print("Bot is running...")
 app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-
-
