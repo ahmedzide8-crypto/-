@@ -1064,12 +1064,18 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
     # كود سلعة
     m = _RE_PRODUCT.search(text_up)
     if m:
-        code = m.group(1)
-        logging.warning("[IG-LOOKUP] أبحث عن سلعة code=%s shop_id=%s", code, shop_id)
-        product = db.get_product(code)
-        logging.warning("[IG-LOOKUP] نتيجة: product=%s", product)
-        if product is None or product["shop_id"] != shop_id:
-            _send_instagram_message_raw(send_account_id, ig_token, sender_id,
+       code = m.group(1)
+logging.warning("code=%s", code)
+
+product = db.get_product(code)
+logging.warning("product=%s", product)
+
+logging.warning("current_shop=%s", shop_id)
+
+if product:
+    logging.warning("product_shop=%s", product["shop_id"])
+
+if product is None or product["shop_id"] != shop_id:
                                         "لم أجد هذا الكود، تأكّد منه.")
             return
         # احفظ آخر سلعة بربط معرف الزبون على إنستغرام كمعرّف وهمي سالب
