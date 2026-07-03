@@ -96,7 +96,7 @@ OWNER_KB = ReplyKeyboardMarkup(
 # ────────────────────────────────────────────────────────────
 def _eff_uid(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> int:
     """يُعيد المعرّف الوهمي في وضع محل الاختبار (من قاعدة البيانات)"""
-    real_uid = update.effective_chat.id
+    real_uid = update.effective_user.id
     state = db.get_admin_mode(real_uid)
     if state["mode"] == TEST_SHOP:
         return state["test_shop_id"]
