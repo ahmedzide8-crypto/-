@@ -1076,8 +1076,13 @@ if product:
     logging.warning("product_shop=%s", product["shop_id"])
 
 if product is None or product["shop_id"] != shop_id:
-                                        "لم أجد هذا الكود، تأكّد منه.")
-            return
+    _send_instagram_message_raw(
+        send_account_id,
+        ig_token,
+        sender_id,
+        "لم أجد هذا الكود، تأكد منه."
+    )
+    return
         # احفظ آخر سلعة بربط معرف الزبون على إنستغرام كمعرّف وهمي سالب
         try:
             fake_uid = -int(sender_id) if sender_id.isdigit() else None
