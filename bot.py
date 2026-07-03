@@ -6,7 +6,9 @@ import time
 import requests
 from datetime import date as _date, time as _time
 
+import urllib.parse
 from flask import Flask, request as http_req, Response
+from itsdangerous import URLSafeTimedSerializer
 
 import database as db
 from telegram import (
@@ -33,28 +35,20 @@ TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 assert TOKEN, "يجب ضبط BOT_TOKEN أو TELEGRAM_BOT_TOKEN"
 OWNER_CHAT_ID = int(os.environ["OWNER_CHAT_ID"])
 
-# ── إعدادات إنستغرام ─────────────────────────────────────────
-IG_ACCESS_TOKEN = os.environ.get("IG_ACCESS_TOKEN", "")
-IG_SHOP_ACCOUNT_ID = "17841452792505045"  # معرف fbiisajoke كما يظهر بالـ webhook
-IG_SHOP_SEND_ACCOUNT_ID = os.environ.get("IG_SHOP_SEND_ACCOUNT_ID", IG_SHOP_ACCOUNT_ID)  # المعرف الحقيقي المرتبط بالتوكن للإرسال
-IG_SHOP_OWNER_TELEGRAM_ID = -760930914   # محل اختبار (معرّف سالب مثل /testclient)
-
-IG_SHOP2_ACCOUNT_ID = os.environ.get("IG_SHOP2_ACCOUNT_ID", "")
-IG_SHOP2_ACCESS_TOKEN = os.environ.get("IG_SHOP2_ACCESS_TOKEN", "")
-IG_SHOP2_SEND_ACCOUNT_ID = os.environ.get("IG_SHOP2_SEND_ACCOUNT_ID", IG_SHOP2_ACCOUNT_ID)
-
-IG_SHOPS = {
-    IG_SHOP_ACCOUNT_ID: {"token": IG_ACCESS_TOKEN, "owner": IG_SHOP_OWNER_TELEGRAM_ID, "send_id": IG_SHOP_SEND_ACCOUNT_ID},
-}
-if IG_SHOP2_ACCOUNT_ID and IG_SHOP2_ACCESS_TOKEN:
-    IG_SHOPS[IG_SHOP2_ACCOUNT_ID] = {"token": IG_SHOP2_ACCESS_TOKEN, "owner": IG_SHOP_OWNER_TELEGRAM_ID, "send_id": IG_SHOP2_SEND_ACCOUNT_ID}
-
+# ── إعدادات OAuth لإنستغرام (لتدفق الربط الذاتي) ─────────────
+# IG_SHOP_ACCOUNT_ID / IG_ACCESS_TOKEN / IG_SHOP_OWNER_TELEGRAM_ID
+# تُقرأ من البيئة في seed_ig_shops_from_env() فقط، ثم يعتمد الكود على ig_shops في DB
+IG_APP_ID        = os.environ.get("IG_APP_ID", "")
+IG_APP_SECRET    = os.environ.get("IG_APP_SECRET", "")
+IG_REDIRECT_URI  = os.environ.get("IG_REDIRECT_URI", "")
+STATE_SECRET_KEY = os.environ.get("STATE_SECRET_KEY", "change-me-in-prod")
 
 # ── تهيئة قاعدة البيانات ─────────────────────────────────────
 logging.basicConfig(level=logging.WARNING)
 db.init_db()
 db.migrate_from_json("products.json", OWNER_CHAT_ID)  # no-op إن سبق تنفيذها
 db.cleanup_admin_shop(OWNER_CHAT_ID)                  # تنظيف لمرة واحدة
+db.seed_ig_shops_from_env()                           # no-op إن سبق التنفيذ
 
 # ── تحقق عند بدء التشغيل ─────────────────────────────────────
 _env_admin = os.environ.get("ADMIN_TELEGRAM_ID", "").strip()
@@ -91,7 +85,8 @@ ADMIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 OWNER_KB = ReplyKeyboardMarkup(
-    [["➕ إضافة سلعة"], ["📋 عرض السلع", "🗑 حذف سلعة"], ["🔔 الإشعارات"]],
+    [["➕ إضافة سلعة"], ["📋 عرض السلع", "🗑 حذف سلعة"],
+     ["🔔 الإشعارات", "🔗 ربط إنستغرام"]],
     resize_keyboard=True,
 )
 
@@ -245,6 +240,32 @@ async def deleteinfo(update: Update, _context: ContextTypes.DEFAULT_TYPE):
         return
     db.clear_test_shop(-uid)  # يحذف admin_state أيضاً داخلياً
     await update.message.reply_text("🧹 حُذفت بيانات الاختبار.")
+
+
+async def ig_connect(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    """🔗 ربط إنستغرام — يولّد رابط OAuth ويرسله لصاحب المحل"""
+    real_uid = update.effective_chat.id
+    if not can_manage(real_uid):
+        await _deny_pending(update, _context)
+        return
+    if not IG_APP_ID or not IG_REDIRECT_URI:
+        await update.message.reply_text(
+            "❌ ربط إنستغرام غير متاح حالياً — تواصل مع الإدارة لإعداد التطبيق."
+        )
+        return
+    s = URLSafeTimedSerializer(STATE_SECRET_KEY)
+    signed_state = s.dumps(real_uid, salt="ig-oauth")
+    params = urllib.parse.urlencode({
+        "client_id":     IG_APP_ID,
+        "redirect_uri":  IG_REDIRECT_URI,
+        "response_type": "code",
+        "scope":         "instagram_business_basic,instagram_business_manage_messages",
+        "state":         signed_state,
+    })
+    oauth_url = f"https://www.instagram.com/oauth/authorize?{params}"
+    await update.message.reply_text(
+        f"🔗 لربط حساب إنستغرام افتح الرابط التالي (صالح 15 دقيقة):\n\n{oauth_url}"
+    )
 
 
 # ────────────────────────────────────────────────────────────
@@ -844,10 +865,36 @@ async def job_expiring_soon(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.bot_data["expiring_notified"] = today
 
 
+async def job_refresh_ig_tokens(_context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Refresh Instagram tokens expiring within the next 7 days."""
+    threshold = int(time.time()) + 7 * 86400
+    shops = db.list_ig_shops_expiring_before(threshold)
+    for shop in shops:
+        wid = shop["webhook_account_id"]
+        try:
+            r = requests.get(
+                "https://graph.instagram.com/refresh_access_token",
+                params={"grant_type": "ig_refresh_token", "access_token": shop["access_token"]},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                new_token   = data["access_token"]
+                expires_in  = data.get("expires_in", 5_184_000)
+                db.update_ig_shop_token(wid, new_token, int(time.time()) + expires_in)
+                logging.warning("[IG-REFRESH] ✅ Token refreshed for shop %s", wid)
+            else:
+                logging.error("[IG-REFRESH] ❌ Failed for %s: %s %s",
+                              wid, r.status_code, r.text[:200])
+        except Exception as e:
+            logging.error("[IG-REFRESH] ❌ Exception for %s: %s", wid, e)
+
+
 async def _post_init(application) -> None:
     jq = application.job_queue
-    jq.run_daily(job_expire_shops,  _time(0, 5))
-    jq.run_daily(job_expiring_soon, _time(0, 10))
+    jq.run_daily(job_expire_shops,      _time(0, 5))
+    jq.run_daily(job_expiring_soon,     _time(0, 10))
+    jq.run_daily(job_refresh_ig_tokens, _time(3, 0))
 
 
 # ────────────────────────────────────────────────────────────
@@ -900,6 +947,7 @@ app.add_handler(add_conv)
 app.add_handler(del_conv)
 app.add_handler(MessageHandler(filters.Regex(r"^📋 عرض السلع$"),             list_products))
 app.add_handler(MessageHandler(filters.Regex(r"^🔔 الإشعارات$"),        show_notifications))
+app.add_handler(MessageHandler(filters.Regex(r"^🔗 ربط إنستغرام$"),       ig_connect))
 app.add_handler(MessageHandler(filters.Regex(r"^📊 المشتركون$"),       show_subscribers))
 app.add_handler(MessageHandler(filters.Regex(r"^📈 إحصاءات المنصّة$"), show_stats))
 # كود التفعيل يُعالَج قبل echo
@@ -907,22 +955,21 @@ app.add_handler(MessageHandler(filters.Regex(r"^ACT-[A-Z0-9]{5}$"),    handle_ac
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,         echo))
 
 # ────────────────────────────────────────────────────────────
-# ردّ تلقائي على رسائل إنستغرام
+# Instagram auto-reply — DB-backed multi-tenant sending
 # ────────────────────────────────────────────────────────────
-def _send_instagram_message_raw(account_id: str, token: str, recipient_id: str, text: str) -> bool:
-    """إرسال رسالة عبر واجهة إنستغرام الرسمية. يُرجع True عند النجاح."""
-    if not token:
-        logging.error("[IG-SEND] token غير مضبوط")
-        return False
-    url = f"https://graph.instagram.com/v25.0/{account_id}/messages"
-    headers = {"Content-Type": "application/json"}
+def _send_instagram_message_raw(
+    send_account_id: str, access_token: str, recipient_id: str, text: str
+) -> bool:
+    """Send a message via the Instagram API with explicit account/token params."""
+    url = f"https://graph.instagram.com/v25.0/{send_account_id}/messages"
     payload = {
         "recipient": {"id": recipient_id},
-        "message": {"text": text},
-        "access_token": token,
+        "message":   {"text": text},
+        "access_token": access_token,
     }
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        r = requests.post(url, json=payload, headers={"Content-Type": "application/json"},
+                          timeout=10)
         if r.status_code == 200:
             logging.warning("[IG-SEND] ✅ رسالة أُرسلت إلى %s", recipient_id)
             return True
@@ -931,11 +978,6 @@ def _send_instagram_message_raw(account_id: str, token: str, recipient_id: str, 
     except Exception as e:
         logging.error("[IG-SEND] ❌ استثناء: %s", e)
         return False
-
-
-def send_instagram_message(recipient_id: str, text: str) -> bool:
-    """توافقية: يرسل من حساب المحل الافتراضي (fbiisajoke)."""
-    return _send_instagram_message_raw(IG_SHOP_ACCOUNT_ID, IG_ACCESS_TOKEN, recipient_id, text)
 
 
 def send_telegram_message_http(chat_id: int, text: str) -> bool:
@@ -965,15 +1007,23 @@ _HUMAN_HANDOFF_DURATION = 24 * 60 * 60  # 24 ساعة بالثواني
 
 def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> None:
     """نقطة دخول رسائل إنستغرام — تطبّق منطق الزبون وترد عبر إنستغرام."""
-    shop = IG_SHOPS.get(recipient_id)
+    # البحث عن المحل في DB بواسطة webhook_account_id
+    shop = db.get_ig_shop_by_webhook_id(recipient_id)
     if shop is None:
-        logging.warning("[IG] رسالة لمستلم غير معروف: %s", recipient_id)
-        return
-    shop_account_id = shop["send_id"]
-    shop_token = shop["token"]
-
-    def send_instagram_message(recipient_id: str, text: str) -> bool:
-        return _send_instagram_message_raw(shop_account_id, shop_token, recipient_id, text)
+        # self-healing: قد يختلف webhook_account_id عن send_account_id
+        shop = db.get_ig_shop_by_send_account_id(recipient_id)
+        if shop is not None:
+            logging.warning(
+                "[IG-LOOKUP] self-heal: تحديث webhook_id من %s إلى %s",
+                shop["webhook_account_id"], recipient_id
+            )
+            db.update_ig_shop_webhook_id(shop["webhook_account_id"], recipient_id)
+        else:
+            logging.warning("[IG] رسالة لمستلم غير معروف: %s", recipient_id)
+            return
+    send_account_id = shop["send_account_id"]
+    ig_token        = shop["access_token"]
+    shop_id         = shop["owner_telegram_id"]  # قد يكون سالباً في بيئة الاختبار
 
     # فحص: هل هذا الزبون في وضع الإسكات (طلب التحدث مع إنسان خلال 24 ساعة الماضية)؟
     _now_ts = int(time.time())
@@ -987,13 +1037,13 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
                 sender_id, _remaining_hrs, text.strip()[:100]
             )
             db.add_notification(
-                shop["owner"],
+                shop_id,
                 "inquiry",
                 f"📩 [أثناء الإسكات — الزبون طلب التحدث مع إنسان] {text.strip()}",
                 None
             )
             send_telegram_message_http(
-                abs(shop["owner"]),
+                abs(shop_id),
                 f"📩 رسالة جديدة من زبون في وضع التحدث مع إنسان:\n{text.strip()}\n"
                 f"معرّف الزبون (IG): {sender_id}"
             )
@@ -1001,13 +1051,14 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
         else:
             _HUMAN_HANDOFF_TS.pop(sender_id, None)
             logging.warning("[IG-SILENCE] انتهت مدة الإسكات للزبون %s، عودة للرد التلقائي", sender_id)
-    shop_id = shop["owner"]
+
     text_stripped = text.strip()
     text_up = text_stripped.upper()
 
     # تحية
     if _RE_GREETING.match(text_stripped):
-        send_instagram_message(sender_id, "أهلاً وسهلاً 👋\nأرسل كود السلعة التي تريد الاستفسار عنها.")
+        _send_instagram_message_raw(send_account_id, ig_token, sender_id,
+                                    "أهلاً وسهلاً 👋\nأرسل كود السلعة التي تريد الاستفسار عنها.")
         return
 
     # كود سلعة
@@ -1018,7 +1069,8 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
         product = db.get_product(code)
         logging.warning("[IG-LOOKUP] نتيجة: product=%s", product)
         if product is None or product["shop_id"] != shop_id:
-            send_instagram_message(sender_id, "لم أجد هذا الكود، تأكّد منه.")
+            _send_instagram_message_raw(send_account_id, ig_token, sender_id,
+                                        "لم أجد هذا الكود، تأكّد منه.")
             return
         # احفظ آخر سلعة بربط معرف الزبون على إنستغرام كمعرّف وهمي سالب
         try:
@@ -1028,19 +1080,19 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
         if fake_uid is not None:
             db.set_admin_last_product(fake_uid, code)
         sizes = ", ".join(product["sizes"])
-        send_instagram_message(sender_id,
+        _send_instagram_message_raw(send_account_id, ig_token, sender_id,
             f"📦 {product['name']}\n"
             f"💰 السعر: {product['price']}\n"
             f"📐 القياسات: {sizes}\n"
             f"📌 الحالة: متوفر"
         )
-        send_instagram_message(sender_id, "لو حابب تطلب، أرسل:\nالاسم / رقم الهاتف / العنوان")
+        _send_instagram_message_raw(send_account_id, ig_token, sender_id,
+                                    "لو حابب تطلب، أرسل:\nالاسم / رقم الهاتف / العنوان")
         return
 
     # رقم هاتف = طلب
     if _RE_PHONE.search(text_stripped):
         name, phone, address = _parse_order(text_stripped)
-        # استرجاع آخر سلعة من قاعدة البيانات
         product_code = ""
         try:
             fake_uid = -int(sender_id) if sender_id.isdigit() else None
@@ -1058,9 +1110,8 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
         logging.warning("[IG-NOTIF] أحفظ إشعار لـ shop_id=%s kind=order", shop_id)
         db.add_notification(shop_id, "order", notif, None)
         logging.warning("[IG-NOTIF] ✅ حُفظ الإشعار")
-        # إشعار فوري لصاحب المحل عبر تيليجرام HTTP
-        real_chat = abs(shop_id)
-        notif_msg = (
+        send_telegram_message_http(
+            abs(shop_id),
             f"🛒 طلب جديد من إنستغرام\n"
             f"السلعة: {product_code or '—'}\n"
             f"الاسم: {name or '—'}\n"
@@ -1068,44 +1119,42 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
             f"العنوان: {address or '—'}\n"
             f"معرّف الزبون (IG): {sender_id}"
         )
-        send_telegram_message_http(real_chat, notif_msg)
-        send_instagram_message(sender_id, "تم استلام طلبك ✅ سيتواصل معك المحل قريباً.")
+        _send_instagram_message_raw(send_account_id, ig_token, sender_id,
+                                    "تم استلام طلبك ✅ سيتواصل معك المحل قريباً.")
         logging.warning("[IG] طلب جديد محفوظ: order_id=%s", order_id)
         return
 
-    # كشف طلب التحدث مع إنسان (يُفحص قبل اعتباره استفساراً عاماً)
+    # كشف طلب التحدث مع إنسان
     human_keywords = ["تحدث مع إنسان", "اتكلم مع انسان", "اريد انسان", "أريد إنسان",
                       "مع انسان", "مع إنسان", "human", "agent", "صاحب المحل",
                       "كلم صاحب", "اكلم صاحب"]
     text_lower = text_stripped.lower()
     if any(kw.lower() in text_lower for kw in human_keywords):
-        real_chat = abs(shop_id)
-        notif_msg = (
+        send_telegram_message_http(
+            abs(shop_id),
             f"🆘 طلب تحدث مع إنسان\n"
             f"الزبون يطلب التحدث معك مباشرة عبر إنستغرام.\n"
             f"معرّف الزبون (IG): {sender_id}\n"
             f"الرسالة: {text_stripped}"
         )
-        send_telegram_message_http(real_chat, notif_msg)
         db.add_notification(shop_id, "inquiry", f"🆘 [طلب إنسان] {text_stripped}", None)
         _HUMAN_HANDOFF_TS[sender_id] = int(time.time())
         logging.warning("[IG-SILENCE] تم إسكات البوت للزبون %s لمدة 24 ساعة", sender_id)
-        send_instagram_message(sender_id,
+        _send_instagram_message_raw(send_account_id, ig_token, sender_id,
             "تم تنبيه صاحب المحل وسيتواصل معك مباشرة في أقرب وقت ممكن 🙏\n"
             "شكراً لصبرك."
         )
         return
 
     # استفسار عام
-    real_chat = abs(shop_id)
     logging.warning("[IG-NOTIF] أحفظ إشعار لـ shop_id=%s kind=inquiry", shop_id)
     db.add_notification(shop_id, "inquiry", f"[إنستغرام {sender_id}] {text_stripped}", None)
     logging.warning("[IG-NOTIF] ✅ حُفظ الإشعار")
     send_telegram_message_http(
-        real_chat,
+        abs(shop_id),
         f"❓ استفسار من إنستغرام\n{text_stripped}\nمعرّف الزبون (IG): {sender_id}"
     )
-    send_instagram_message(sender_id,
+    _send_instagram_message_raw(send_account_id, ig_token, sender_id,
         "شكراً لتواصلك معنا 🙏\n"
         "سؤالك وصل لصاحب المحل وسيرد عليك في أقرب وقت.\n\n"
         "في هذي الأثناء يمكنك:\n"
@@ -1304,6 +1353,110 @@ Send an email to <a href="mailto:mahalliapp26@gmail.com">mahalliapp26@gmail.com<
 </body>
 </html>'''
     return Response(html, mimetype="text/html")
+
+
+@_flask_app.route("/instagram/callback", methods=["GET"])
+def _ig_oauth_callback():
+    """استقبال OAuth redirect من Meta بعد منح الصلاحيات."""
+    code  = http_req.args.get("code", "")
+    state = http_req.args.get("state", "")
+    error = http_req.args.get("error", "")
+    if error:
+        logging.warning("[IG-OAUTH] خطأ من Meta: %s", error)
+        return Response("<h1>❌ فشل الربط — أغلق هذه الصفحة وحاول مجدداً.</h1>",
+                        mimetype="text/html", status=400)
+    if not code or not state:
+        return Response("<h1>❌ طلب غير صالح.</h1>", mimetype="text/html", status=400)
+
+    # التحقق من state وفكّ تشفيره
+    try:
+        s = URLSafeTimedSerializer(STATE_SECRET_KEY)
+        owner_telegram_id = int(s.loads(state, salt="ig-oauth", max_age=900))
+    except Exception as e:
+        logging.warning("[IG-OAUTH] state غير صالح: %s", e)
+        return Response("<h1>❌ انتهت صلاحية الرابط (15 دقيقة). أعد المحاولة.</h1>",
+                        mimetype="text/html", status=400)
+
+    # استبدال code بـ short-lived token
+    try:
+        r1 = requests.post(
+            "https://api.instagram.com/oauth/access_token",
+            data={
+                "client_id":     IG_APP_ID,
+                "client_secret": IG_APP_SECRET,
+                "grant_type":    "authorization_code",
+                "redirect_uri":  IG_REDIRECT_URI,
+                "code":          code,
+            },
+            timeout=15,
+        )
+        r1.raise_for_status()
+        short_data  = r1.json()
+        short_token = short_data["access_token"]
+        send_account_id = str(short_data["user_id"])
+    except Exception as e:
+        logging.error("[IG-OAUTH] فشل استبدال code: %s", e)
+        return Response("<h1>❌ فشل الاتصال بـ Meta. أعد المحاولة.</h1>",
+                        mimetype="text/html", status=502)
+
+    # تحويل إلى long-lived token (60 يوم)
+    try:
+        r2 = requests.get(
+            "https://graph.instagram.com/access_token",
+            params={
+                "grant_type":    "ig_exchange_token",
+                "client_secret": IG_APP_SECRET,
+                "access_token":  short_token,
+            },
+            timeout=15,
+        )
+        r2.raise_for_status()
+        ll_data     = r2.json()
+        long_token  = ll_data["access_token"]
+        expires_in  = ll_data.get("expires_in", 5_184_000)
+        expires_at  = int(time.time()) + expires_in
+    except Exception as e:
+        logging.error("[IG-OAUTH] فشل تحويل long-lived token: %s", e)
+        return Response("<h1>❌ فشل الحصول على token طويل الأمد.</h1>",
+                        mimetype="text/html", status=502)
+
+    # الحصول على username الحقيقي عبر /me
+    try:
+        r3 = requests.get(
+            f"https://graph.instagram.com/v25.0/{send_account_id}",
+            params={"fields": "username", "access_token": long_token},
+            timeout=15,
+        )
+        username = r3.json().get("username", "") if r3.status_code == 200 else ""
+    except Exception:
+        username = ""
+
+    # حفظ في DB (webhook_account_id = send_account_id مبدئياً؛ يُصحَّح تلقائياً عند أول webhook)
+    db.add_ig_shop(
+        webhook_account_id=send_account_id,
+        send_account_id=send_account_id,
+        access_token=long_token,
+        token_expires_at=expires_at,
+        owner_telegram_id=owner_telegram_id,
+        username=username,
+    )
+    logging.warning("[IG-OAUTH] ✅ محل إنستغرام @%s مربوط لـ telegram_id=%s",
+                    username, owner_telegram_id)
+
+    # إشعار صاحب المحل عبر Telegram
+    send_telegram_message_http(
+        abs(owner_telegram_id),
+        f"✅ تم ربط حساب إنستغرام بنجاح!\n"
+        f"الحساب: @{username}\n"
+        f"معرّف الحساب: {send_account_id}\n"
+        f"صلاحية التوكن حتى: {int(expires_in // 86400)} يوماً"
+    )
+
+    return Response(
+        "<h1 style='font-family:sans-serif;text-align:center;margin-top:60px'>"
+        "✅ تم ربط حساب إنستغرام بنجاح! يمكنك إغلاق هذه الصفحة.</h1>",
+        mimetype="text/html"
+    )
 
 
 def _run_web_server() -> None:
