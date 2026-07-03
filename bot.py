@@ -1082,14 +1082,16 @@ if product is None or product["shop_id"] != shop_id:
         sender_id,
         "لم أجد هذا الكود، تأكد منه."
     )
-    return
-        # احفظ آخر سلعة بربط معرف الزبون على إنستغرام كمعرّف وهمي سالب
-        try:
-            fake_uid = -int(sender_id) if sender_id.isdigit() else None
-        except Exception:
-            fake_uid = None
-        if fake_uid is not None:
-            db.set_admin_last_product(fake_uid, code)
+   return
+
+# احفظ آخر سلعة...
+try:
+    fake_uid = -int(sender_id) if sender_id.isdigit() else None
+except Exception:
+    fake_uid = None
+
+if fake_uid is not None:
+    db.set_admin_last_product(fake_uid, code)
         sizes = ", ".join(product["sizes"])
         _send_instagram_message_raw(send_account_id, ig_token, sender_id,
             f"📦 {product['name']}\n"
