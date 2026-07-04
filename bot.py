@@ -1514,6 +1514,23 @@ def _ig_oauth_callback():
     except Exception:
         username = ""
 
+    # تحذير استباقي: هل فيه محل ثاني "معلّق" لسا ما استلم رسالة اختبار؟
+    other_pending = [
+        p for p in db.get_pending_ig_shops()
+        if p["owner_telegram_id"] != owner_telegram_id
+    ]
+    if other_pending:
+        admin_id = db.get_admin_id()
+        if admin_id:
+            names = ", ".join(f"@{p['username'] or p['owner_telegram_id']}" for p in other_pending)
+            send_telegram_message_http(
+                admin_id,
+                f"⚠️ تنبيه: محل @{username or owner_telegram_id} ربط حسابه الآن، "
+                f"بينما {names} لسا ما أرسل رسالة اختبار بعد.\n"
+                f"اطلب منهم يرسلون رسالة اختبار **بالتتابع** (وحد بعد الثاني)، "
+                f"مو بنفس اللحظة، عشان النظام يتعرّف على كل حساب صح."
+            )
+
     # حذف أي محل قديم لنفس المالك (تفادي صفوف مكررة عند إعادة الربط)
     db.delete_ig_shop_by_owner(owner_telegram_id)
 
