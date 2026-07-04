@@ -652,6 +652,24 @@ def get_ig_shop_by_owner(owner_telegram_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def get_pending_ig_shops() -> list:
+    """محلات ربطت حديثاً وما تأكد لها webhook_account_id الحقيقي بعد."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM ig_shops WHERE webhook_account_id LIKE 'pending:%' AND status = 'active'"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_ig_shop_by_owner(owner_telegram_id: int) -> None:
+    """احذف أي صف قديم لنفس المالك قبل إعادة ربط حسابه (يمنع صفوف مكررة)."""
+    with _conn() as con:
+        con.execute(
+            "DELETE FROM ig_shops WHERE owner_telegram_id = ?",
+            (owner_telegram_id,)
+        )
+
+
 def update_ig_shop_token(webhook_account_id: str, access_token: str, expires_at: int) -> None:
     """Persist a refreshed long-lived token."""
     with _conn() as con:
