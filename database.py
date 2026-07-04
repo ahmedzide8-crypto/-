@@ -128,6 +128,16 @@ def init_db() -> None:
                 created_at          INTEGER NOT NULL,
                 status              TEXT    NOT NULL DEFAULT 'active'
             );
+
+            -- متغيّرات السلعة: كل صف = (كود السلعة + لون + قياس) وله كميته الخاصة.
+            CREATE TABLE IF NOT EXISTS variants (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                code     TEXT    NOT NULL REFERENCES products(code),
+                color    TEXT    NOT NULL DEFAULT '',
+                size     TEXT    NOT NULL DEFAULT '',
+                quantity INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(code, color, size)
+            );
         """)
 
         # أضف الأعمدة الجديدة آمناً على قواعد بيانات قائمة
@@ -337,7 +347,71 @@ def delete_product(code: str, shop_id: int) -> bool:
             con.execute(
                 "INSERT OR IGNORE INTO retired_codes (code) VALUES (?)", (code,)
             )
+            con.execute("DELETE FROM variants WHERE code = ?", (code,))
         return bool(affected)
+
+
+# ────────────────────────────────────────────────────────────
+# متغيّرات السلعة (لون + قياس + كمية)
+# ────────────────────────────────────────────────────────────
+def add_variant(code: str, color: str, quantity: int, size: str = "") -> None:
+    """أضف تركيبة (لون+قياس) بكميتها. إن وُجدت، اجمع الكمية عليها."""
+    with _conn() as con:
+        con.execute(
+            """INSERT INTO variants (code, color, size, quantity)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(code, color, size)
+               DO UPDATE SET quantity = quantity + excluded.quantity""",
+            (code, color, size, quantity)
+        )
+
+
+def get_variants(code: str, in_stock_only: bool = False) -> list:
+    """اجلب كل تركيبات سلعة. مع in_stock_only=True يرجّع المتوفر فقط (كمية>0)."""
+    with _conn() as con:
+        q = "SELECT color, size, quantity FROM variants WHERE code = ?"
+        if in_stock_only:
+            q += " AND quantity > 0"
+        q += " ORDER BY id"
+        return [dict(r) for r in con.execute(q, (code,)).fetchall()]
+
+
+def get_variant(code: str, color: str, size: str = "") -> Optional[dict]:
+    """اجلب تركيبة محددة (مطابقة غير حسّاسة لحالة الأحرف على اللون والقياس)."""
+    with _conn() as con:
+        row = con.execute(
+            """SELECT color, size, quantity FROM variants
+               WHERE code = ? AND LOWER(color) = LOWER(?) AND LOWER(size) = LOWER(?)""",
+            (code, color, size)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def decrement_variant(code: str, color: str, amount: int, size: str = "") -> bool:
+    """أنقص كمية تركيبة عند قبول الطلب. يرجّع False إن كانت الكمية غير كافية."""
+    with _conn() as con:
+        row = con.execute(
+            """SELECT quantity FROM variants
+               WHERE code = ? AND LOWER(color) = LOWER(?) AND LOWER(size) = LOWER(?)""",
+            (code, color, size)
+        ).fetchone()
+        if row is None or row["quantity"] < amount:
+            return False
+        con.execute(
+            """UPDATE variants SET quantity = quantity - ?
+               WHERE code = ? AND LOWER(color) = LOWER(?) AND LOWER(size) = LOWER(?)""",
+            (amount, code, color, size)
+        )
+        return True
+
+
+def has_variants(code: str) -> bool:
+    """هل للسلعة تركيبات مسجّلة؟ (لتمييز السلع القديمة بلا مخزون)."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT 1 FROM variants WHERE code = ? LIMIT 1", (code,)
+        ).fetchone()
+        return row is not None
 
 
 # ────────────────────────────────────────────────────────────
