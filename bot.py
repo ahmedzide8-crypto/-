@@ -1155,6 +1155,165 @@ _HUMAN_HANDOFF_TS: dict = {}
 _HUMAN_HANDOFF_DURATION = 24 * 60 * 60  # 24 ساعة بالثواني
 
 
+def _send_ig(send_account_id, ig_token, sender_id, text):
+    """اختصار لإرسال رسالة إنستغرام."""
+    _send_instagram_message_raw(send_account_id, ig_token, sender_id, text)
+
+
+def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
+                        product, code, text_stripped) -> bool:
+    """
+    يدير طلب الزبون خطوة بخطوة للسلع التي لها ألوان/مخزون.
+    يرجّع True إذا عالج الرسالة (فلا يكمل المنطق القديم)، False إذا لا شأن له بها.
+    """
+    flow = db.get_order_flow(sender_id)
+    step = flow["step"] if flow else "idle"
+
+    # ── الزبون أرسل كود سلعة لها مخزون → ابدأ تدفق الطلب ──
+    if product is not None and db.has_variants(code):
+        colors = db.get_available_colors(code)
+        sizes_no_color = db.get_available_sizes_for_color(code, "")  # سلعة بلا ألوان لكن بمخزون
+
+        # حالة: السلعة لها ألوان
+        if colors:
+            lines = [f"📦 {product['name']}", f"💰 السعر: {product['price']}", ""]
+            lines.append("🎨 الألوان المتوفرة:")
+            for c in colors:
+                lines.append(f"  • {c}")
+            lines.append("\nاكتب اسم اللون الذي تريده 👇")
+            _send_ig(send_account_id, ig_token, sender_id, "\n".join(lines))
+            db.set_order_flow(sender_id, shop_id, "await_color", code=code)
+            return True
+
+        # حالة: بمخزون بلا ألوان → اعرض القياسات المتوفرة مباشرة
+        if sizes_no_color:
+            lines = [f"📦 {product['name']}", f"💰 السعر: {product['price']}", ""]
+            lines.append("📐 القياسات المتوفرة:")
+            for s in sizes_no_color:
+                lines.append(f"  • {s['size']}")
+            lines.append("\nاكتب القياس الذي تريده 👇")
+            _send_ig(send_account_id, ig_token, sender_id, "\n".join(lines))
+            db.set_order_flow(sender_id, shop_id, "await_size", code=code, color="")
+            return True
+
+    # ── لا يوجد طلب جارٍ ولا كود بمخزون → ليس شأن هذا التدفق ──
+    if step == "idle":
+        return False
+
+    # ── خطوة: ننتظر اللون ──
+    if step == "await_color":
+        fcode = flow["code"]
+        colors = db.get_available_colors(fcode)
+        chosen = next((c for c in colors if c.lower() == text_stripped.lower()), None)
+        if chosen is None:
+            _send_ig(send_account_id, ig_token, sender_id,
+                     "❌ هذا اللون غير متوفر. اكتب أحد الألوان المعروضة:\n" +
+                     "\n".join(f"  • {c}" for c in colors))
+            return True
+        sizes = db.get_available_sizes_for_color(fcode, chosen)
+        lines = [f"🎨 اللون: {chosen}", "", "📐 القياسات المتوفرة بهذا اللون:"]
+        for s in sizes:
+            lines.append(f"  • {s['size']}")
+        lines.append("\nاكتب القياس الذي تريده 👇")
+        _send_ig(send_account_id, ig_token, sender_id, "\n".join(lines))
+        db.set_order_flow(sender_id, shop_id, "await_size", code=fcode, color=chosen)
+        return True
+
+    # ── خطوة: ننتظر القياس ──
+    if step == "await_size":
+        fcode, fcolor = flow["code"], flow["color"] or ""
+        sizes = db.get_available_sizes_for_color(fcode, fcolor)
+        chosen = next((s for s in sizes if s["size"].lower() == text_stripped.lower()), None)
+        if chosen is None:
+            _send_ig(send_account_id, ig_token, sender_id,
+                     "❌ هذا القياس غير متوفر. اكتب أحد القياسات المعروضة:\n" +
+                     "\n".join(f"  • {s['size']}" for s in sizes))
+            return True
+        avail = chosen["quantity"]
+        _send_ig(send_account_id, ig_token, sender_id,
+                 f"📐 القياس: {chosen['size']}\n"
+                 f"المتوفر: {avail} قطعة\n\n"
+                 f"كم الكمية التي تريدها؟ اكتب رقماً 👇")
+        db.set_order_flow(sender_id, shop_id, "await_qty",
+                          code=fcode, color=fcolor, size=chosen["size"])
+        return True
+
+    # ── خطوة: ننتظر الكمية ──
+    if step == "await_qty":
+        fcode, fcolor, fsize = flow["code"], flow["color"] or "", flow["size"]
+        try:
+            qty = int(text_stripped)
+        except ValueError:
+            _send_ig(send_account_id, ig_token, sender_id,
+                     "❌ اكتب رقماً صحيحاً للكمية 👇")
+            return True
+        if qty <= 0:
+            _send_ig(send_account_id, ig_token, sender_id, "❌ الكمية يجب أن تكون 1 أو أكثر 👇")
+            return True
+        var = db.get_variant(fcode, fcolor, fsize)
+        if var is None or var["quantity"] < qty:
+            avail = var["quantity"] if var else 0
+            _send_ig(send_account_id, ig_token, sender_id,
+                     f"عذراً 🙏 المتوفر {avail} قطعة فقط من هذا القياس.\n"
+                     f"اكتب كمية {avail} أو أقل 👇")
+            return True
+        # الكمية صالحة → اطلب بيانات التوصيل
+        color_txt = f"اللون: {fcolor} | " if fcolor else ""
+        _send_ig(send_account_id, ig_token, sender_id,
+                 f"✅ اخترت:\n{color_txt}القياس: {fsize} | الكمية: {qty}\n\n"
+                 f"لإتمام الطلب، أرسل بهذا الشكل:\n"
+                 f"الاسم / رقم الهاتف / العنوان")
+        db.set_order_flow(sender_id, shop_id, "await_details",
+                          code=fcode, color=fcolor, size=fsize, quantity=qty)
+        return True
+
+    # ── خطوة: ننتظر بيانات التوصيل ──
+    if step == "await_details":
+        if not _RE_PHONE.search(text_stripped):
+            _send_ig(send_account_id, ig_token, sender_id,
+                     "❌ لم أجد رقم هاتف صحيح. أرسل:\nالاسم / رقم الهاتف / العنوان")
+            return True
+        name, phone, address = _parse_order(text_stripped)
+        fcode  = flow["code"]
+        fcolor = flow["color"] or ""
+        fsize  = flow["size"]
+        fqty   = flow["quantity"]
+        prod = db.get_product(fcode)
+        pname = prod["name"] if prod else fcode
+        pprice = prod["price"] if prod else "—"
+
+        # سجّل الطلب (لم تُخصم الكمية بعد — تُخصم عند قبول صاحب المحل)
+        order_detail = f"{fcode} | {fcolor or 'بلا لون'} | {fsize} | كمية {fqty}"
+        order_id = db.add_order(shop_id, order_detail, name, phone, address, None)
+        db.add_notification(shop_id, "order",
+            f"الاسم: {name or '—'} | الهاتف: {phone or '—'} | العنوان: {address or '—'} | "
+            f"السلعة: {pname} ({fcode}) | اللون: {fcolor or '—'} | القياس: {fsize} | "
+            f"الكمية: {fqty} | المصدر: إنستغرام ({sender_id})", None)
+
+        color_line = f"🎨 اللون: {fcolor}\n" if fcolor else ""
+        send_telegram_message_http(
+            abs(shop_id),
+            f"🛒 طلب جديد من إنستغرام\n\n"
+            f"📦 السلعة: {pname} ({fcode})\n"
+            f"{color_line}"
+            f"📐 القياس: {fsize}\n"
+            f"🔢 الكمية: {fqty}\n"
+            f"💰 السعر: {pprice}\n\n"
+            f"👤 الاسم: {name or '—'}\n"
+            f"📞 الهاتف: {phone or '—'}\n"
+            f"📍 العنوان: {address or '—'}\n"
+            f"🆔 معرّف الزبون (IG): {sender_id}\n\n"
+            f"⏳ الطلب بانتظار قبولك."
+        )
+        _send_ig(send_account_id, ig_token, sender_id,
+                 "تم استلام طلبك ✅ سيتواصل معك المحل قريباً بعد تأكيد الطلب.")
+        db.clear_order_flow(sender_id)
+        logging.warning("[IG] طلب تفصيلي محفوظ: order_id=%s detail=%s", order_id, order_detail)
+        return True
+
+    return False
+
+
 def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> None:
     """نقطة دخول رسائل إنستغرام — تطبّق منطق الزبون وترد عبر إنستغرام."""
     # البحث عن المحل في DB بواسطة webhook_account_id
@@ -1225,6 +1384,19 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
     if _RE_GREETING.match(text_stripped):
         _send_instagram_message_raw(send_account_id, ig_token, sender_id,
                                     "أهلاً وسهلاً 👋\nأرسل كود السلعة التي تريد الاستفسار عنها.")
+        return
+
+    # ── تدفق الطلب التفاعلي (لون → قياس → كمية → بيانات) للسلع ذات المخزون ──
+    # أولاً: هل الرسالة كود سلعة؟ لنجلب السلعة إن وُجدت.
+    _m_code = _RE_PRODUCT.search(text_up)
+    _flow_code = _m_code.group(1) if _m_code else None
+    _flow_product = db.get_product(_flow_code) if _flow_code else None
+    # تحقّق ملكية السلعة لهذا المحل
+    if _flow_product is not None and _flow_product["shop_id"] != shop_id:
+        _flow_product = None
+        _flow_code = None
+    if _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
+                           _flow_product, _flow_code, text_stripped):
         return
 
     # كود سلعة
@@ -1686,6 +1858,12 @@ def _run_web_server() -> None:
     port = int(os.environ.get("PORT", 8080))
     logging.warning("[Webhook] خادم الويب يعمل على المنفذ %d", port)
     _flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
+
+
+threading.Thread(target=_run_web_server, daemon=True).start()
+
+print("Bot is running...")
+app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 threading.Thread(target=_run_web_server, daemon=True).start()
