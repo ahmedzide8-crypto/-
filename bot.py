@@ -1211,6 +1211,15 @@ _HUMAN_HANDOFF_TS: dict = {}
 _HUMAN_HANDOFF_DURATION = 24 * 60 * 60  # 24 ساعة بالثواني
 
 
+def _stock_phrase(qty: int) -> str:
+    """عبارة تُعرض للزبون بدل الرقم الدقيق (تحمي أسرار المخزون + تخلق إلحاحاً)."""
+    if qty <= 0:
+        return "غير متوفر"
+    if qty <= 5:
+        return "بقي القليل ⚡"
+    return "متوفر ✅"
+
+
 def _send_ig(send_account_id, ig_token, sender_id, text):
     """اختصار لإرسال رسالة إنستغرام."""
     _send_instagram_message_raw(send_account_id, ig_token, sender_id, text)
@@ -1288,7 +1297,7 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
         avail = chosen["quantity"]
         _send_ig(send_account_id, ig_token, sender_id,
                  f"📐 القياس: {chosen['size']}\n"
-                 f"المتوفر: {avail} قطعة\n\n"
+                 f"الحالة: {_stock_phrase(avail)}\n\n"
                  f"كم الكمية التي تريدها؟ اكتب رقماً 👇")
         db.set_order_flow(sender_id, shop_id, "await_qty",
                           code=fcode, color=fcolor, size=chosen["size"])
@@ -1309,9 +1318,13 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
         var = db.get_variant(fcode, fcolor, fsize)
         if var is None or var["quantity"] < qty:
             avail = var["quantity"] if var else 0
-            _send_ig(send_account_id, ig_token, sender_id,
-                     f"عذراً 🙏 المتوفر {avail} قطعة فقط من هذا القياس.\n"
-                     f"اكتب كمية {avail} أو أقل 👇")
+            if avail <= 0:
+                _send_ig(send_account_id, ig_token, sender_id,
+                         "عذراً 🙏 نفد هذا المقاس. جرّب مقاساً أو لوناً آخر.")
+            else:
+                _send_ig(send_account_id, ig_token, sender_id,
+                         "عذراً 🙏 الكمية المطلوبة غير متوفرة حالياً.\n"
+                         "اكتب كمية أقل 👇")
             return True
         # الكمية صالحة → اطلب بيانات التوصيل
         color_txt = f"اللون: {fcolor} | " if fcolor else ""
