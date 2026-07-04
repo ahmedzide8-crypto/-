@@ -225,6 +225,20 @@ async def testcustomer(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def fixwebhook(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/fixwebhook <old_id> <new_id> — صحّح يدوياً webhook_account_id لمحل إنستغرام"""
+    uid = update.effective_chat.id
+    if not db.is_admin(uid):
+        return
+    args = context.args
+    if len(args) != 2:
+        await update.message.reply_text("الاستخدام: /fixwebhook <old_id> <new_id>")
+        return
+    old_id, new_id = args
+    db.update_ig_shop_webhook_id(old_id, new_id)
+    await update.message.reply_text(f"✅ تم تحديث webhook_account_id من {old_id} إلى {new_id}")
+
+
 async def activatereal(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     """/activatereal — فعّل حساب الأدمن الحقيقي كمحل فعلي بلا انتهاء"""
     uid = update.effective_chat.id
@@ -950,6 +964,7 @@ app.add_handler(CommandHandler("testclient",   testclient))
 app.add_handler(CommandHandler("testcustomer", testcustomer))
 app.add_handler(CommandHandler("exittest",     exittest))
 app.add_handler(CommandHandler("activatereal", activatereal))
+app.add_handler(CommandHandler("fixwebhook", fixwebhook))
 app.add_handler(CommandHandler("deleteinfo",   deleteinfo))
 app.add_handler(CommandHandler("whoami",       whoami))
 # callbacks التفعيل: dur_ / gen_ / back_
@@ -1456,6 +1471,20 @@ def _ig_oauth_callback():
     except Exception as e:
         logging.error("[IG-OAUTH] فشل تحويل long-lived token: %s", e)
         return Response("<h1>❌ فشل الحصول على token طويل الأمد.</h1>",
+                        mimetype="text/html", status=502)
+
+    # اشتراك الحساب بالويبهوك — بدون هذي الخطوة ميتا ما ترسل أي إشعار رسائل لهذا الحساب
+    try:
+        r_sub = requests.post(
+            f"https://graph.instagram.com/v25.0/{send_account_id}/subscribed_apps",
+            params={"subscribed_fields": "messages", "access_token": long_token},
+            timeout=15,
+        )
+        logging.warning("[IG-OAUTH] رد الاشتراك بالويبهوك: status=%s body=%s", r_sub.status_code, r_sub.text)
+        r_sub.raise_for_status()
+    except Exception as e:
+        logging.error("[IG-OAUTH] فشل الاشتراك بالويبهوك: %s", e)
+        return Response("<h1>❌ فشل تفعيل استقبال الرسائل لهذا الحساب. أعد المحاولة.</h1>",
                         mimetype="text/html", status=502)
 
     # الحصول على username الحقيقي عبر /me
