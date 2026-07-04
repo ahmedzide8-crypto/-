@@ -59,7 +59,8 @@ else:
     logging.error("[STARTUP] ADMIN_TELEGRAM_ID غير مضبوط في البيئة!")
 
 # ── حالات المحادثة ───────────────────────────────────────────
-ASK_NAME, ASK_PRICE, ASK_SIZES, CONFIRM_ADD, ASK_DEL_CODE = range(5)
+(ASK_NAME, ASK_PRICE, ASK_SIZES, ASK_HAS_COLORS, ASK_COLOR_NAME,
+ ASK_COLOR_QTYS, ASK_MORE_COLORS, CONFIRM_ADD, ASK_DEL_CODE) = range(9)
 
 # ── تسميات المدد للعرض ───────────────────────────────────────
 PLAN_LABELS = {
@@ -616,20 +617,132 @@ async def got_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def got_sizes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sizes = [s.strip() for s in update.message.text.split(",") if s.strip()]
+    if not sizes:
+        await update.message.reply_text("❌ أدخل قياساً واحداً على الأقل (مثال: S,M,L):")
+        return ASK_SIZES
     context.user_data["sizes"] = sizes
-    name  = context.user_data["name"]
-    price = context.user_data["price"]
-    summary = (
-        f"📋 ملخص السلعة:\n"
-        f"📦 الاسم: {name}\n"
-        f"💰 السعر: {price}\n"
-        f"📐 القياسات: {', '.join(sizes)}\n\n"
-        "تأكيد الحفظ؟"
+    context.user_data["variants"] = []   # سنملؤها لوناً بلون
+    yn_kb = ReplyKeyboardMarkup(
+        [["نعم", "لا"]], resize_keyboard=True, one_time_keyboard=True
     )
+    await update.message.reply_text(
+        "🎨 هل تتوفر السلعة بأكثر من لون؟", reply_markup=yn_kb
+    )
+    return ASK_HAS_COLORS
+
+
+async def got_has_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ans = update.message.text.strip()
+    if "نعم" in ans:
+        await update.message.reply_text(
+            "اكتب اسم اللون الأول:", reply_markup=ReplyKeyboardRemove()
+        )
+        return ASK_COLOR_NAME
+    # بلا ألوان: نطلب كمية إجمالية واحدة (تُخزَّن كلون افتراضي فارغ لكل قياس)
+    await update.message.reply_text(
+        "📦 كم الكمية المتوفرة من كل قياس؟\n"
+        "اكتب رقماً واحداً لكل القياسات، أو أرقاماً مفصولة بفاصلة بترتيب القياسات.\n"
+        f"القياسات: {', '.join(context.user_data['sizes'])}",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    context.user_data["current_color"] = ""   # لون افتراضي (بلا لون)
+    return ASK_COLOR_QTYS
+
+
+async def got_color_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    color = update.message.text.strip()
+    if not color:
+        await update.message.reply_text("❌ اكتب اسم اللون:")
+        return ASK_COLOR_NAME
+    context.user_data["current_color"] = color
+    sizes = context.user_data["sizes"]
+    await update.message.reply_text(
+        f"📦 كميات اللون «{color}» لكل قياس.\n"
+        f"اكتب رقماً واحداً لكل القياسات، أو أرقاماً مفصولة بفاصلة بترتيب: {', '.join(sizes)}\n"
+        "(اكتب 0 لأي قياس غير متوفر بهذا اللون)"
+    )
+    return ASK_COLOR_QTYS
+
+
+async def got_color_qtys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sizes = context.user_data["sizes"]
+    color = context.user_data.get("current_color", "")
+    parts = [p.strip() for p in update.message.text.split(",") if p.strip()]
+
+    # تحقّق من صحّة الأرقام
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        await update.message.reply_text("❌ الكميات يجب أن تكون أرقاماً. أعد الإدخال:")
+        return ASK_COLOR_QTYS
+
+    if len(nums) == 1:
+        nums = nums * len(sizes)          # رقم واحد لكل القياسات
+    elif len(nums) != len(sizes):
+        await update.message.reply_text(
+            f"❌ عدد الأرقام ({len(nums)}) لا يطابق عدد القياسات ({len(sizes)}).\n"
+            f"القياسات: {', '.join(sizes)}\nأعد الإدخال:"
+        )
+        return ASK_COLOR_QTYS
+
+    # سجّل كل (قياس → كمية) لهذا اللون بقائمة المتغيّرات المؤقتة
+    for size, qty in zip(sizes, nums):
+        context.user_data["variants"].append(
+            {"color": color, "size": size, "quantity": qty}
+        )
+
+    # لو بلا ألوان (لون افتراضي فارغ) → خلص، اذهب للتأكيد مباشرة
+    if color == "":
+        return await _show_add_summary(update, context)
+
+    # لو بألوان → اسأل هل يوجد لون آخر
+    yn_kb = ReplyKeyboardMarkup(
+        [["نعم", "لا"]], resize_keyboard=True, one_time_keyboard=True
+    )
+    await update.message.reply_text("🎨 هل يوجد لون آخر؟", reply_markup=yn_kb)
+    return ASK_MORE_COLORS
+
+
+async def got_more_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "نعم" in update.message.text.strip():
+        await update.message.reply_text(
+            "اكتب اسم اللون التالي:", reply_markup=ReplyKeyboardRemove()
+        )
+        return ASK_COLOR_NAME
+    return await _show_add_summary(update, context)
+
+
+async def _show_add_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name   = context.user_data["name"]
+    price  = context.user_data["price"]
+    sizes  = context.user_data["sizes"]
+    variants = context.user_data["variants"]
+
+    lines = [
+        "📋 ملخص السلعة:",
+        f"📦 الاسم: {name}",
+        f"💰 السعر: {price}",
+        f"📐 القياسات: {', '.join(sizes)}",
+    ]
+    # ملخّص الكميات
+    has_colors = any(v["color"] for v in variants)
+    if has_colors:
+        lines.append("\n🎨 الألوان والكميات:")
+        # اجمع حسب اللون
+        by_color = {}
+        for v in variants:
+            by_color.setdefault(v["color"], []).append(f"{v['size']}:{v['quantity']}")
+        for color, items in by_color.items():
+            lines.append(f"  • {color} — {', '.join(items)}")
+    else:
+        lines.append("\n📦 الكميات لكل قياس:")
+        lines.append("  " + ", ".join(f"{v['size']}:{v['quantity']}" for v in variants))
+
+    lines.append("\nتأكيد الحفظ؟")
     confirm_kb = ReplyKeyboardMarkup(
         [["✅ نعم", "❌ لا"]], resize_keyboard=True, one_time_keyboard=True
     )
-    await update.message.reply_text(summary, reply_markup=confirm_kb)
+    await update.message.reply_text("\n".join(lines), reply_markup=confirm_kb)
     return CONFIRM_ADD
 
 
@@ -646,6 +759,9 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["price"],
         context.user_data["sizes"],
     )
+    # احفظ متغيّرات (لون+قياس+كمية)
+    for v in context.user_data.get("variants", []):
+        db.add_variant(code, v["color"], v["quantity"], v["size"])
     _clear_conv(context)
     await update.message.reply_text(
         f"تمت الإضافة ✅ — ضع هذا الكود في آخر كابشن منشور السلعة على إنستغرام: {code}",
@@ -935,10 +1051,14 @@ app = ApplicationBuilder().token(TOKEN).persistence(persistence).post_init(_post
 add_conv = ConversationHandler(
     entry_points=[MessageHandler(filters.Regex(r"^➕ إضافة سلعة$"), add_start)],
     states={
-        ASK_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
-        ASK_PRICE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_price)],
-        ASK_SIZES:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_sizes)],
-        CONFIRM_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_save)],
+        ASK_NAME:        [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
+        ASK_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, got_price)],
+        ASK_SIZES:       [MessageHandler(filters.TEXT & ~filters.COMMAND, got_sizes)],
+        ASK_HAS_COLORS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_has_colors)],
+        ASK_COLOR_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_color_name)],
+        ASK_COLOR_QTYS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_color_qtys)],
+        ASK_MORE_COLORS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_more_colors)],
+        CONFIRM_ADD:     [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_save)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
 )
