@@ -1040,17 +1040,33 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
     # البحث عن المحل في DB بواسطة webhook_account_id
     shop = db.get_ig_shop_by_webhook_id(recipient_id)
     if shop is None:
-        # self-healing: قد يختلف webhook_account_id عن send_account_id
+        # self-healing طبقة 1: قد يختلف webhook_account_id عن send_account_id
         shop = db.get_ig_shop_by_send_account_id(recipient_id)
         if shop is not None:
             logging.warning(
-                "[IG-LOOKUP] self-heal: تحديث webhook_id من %s إلى %s",
+                "[IG-LOOKUP] self-heal (send_id): تحديث webhook_id من %s إلى %s",
                 shop["webhook_account_id"], recipient_id
             )
             db.update_ig_shop_webhook_id(shop["webhook_account_id"], recipient_id)
         else:
-            logging.warning("[IG] رسالة لمستلم غير معروف: %s", recipient_id)
-            return
+            # self-healing طبقة 2: محل واحد "معلّق" لسا ما تأكد رقمه — هذا أول webhook حقيقي له
+            pending = db.get_pending_ig_shops()
+            if len(pending) == 1:
+                shop = pending[0]
+                logging.warning(
+                    "[IG-LOOKUP] self-heal (pending): ربط أول webhook حقيقي — من %s إلى %s",
+                    shop["webhook_account_id"], recipient_id
+                )
+                db.update_ig_shop_webhook_id(shop["webhook_account_id"], recipient_id)
+            elif len(pending) > 1:
+                logging.warning(
+                    "[IG] رسالة لمستلم غير معروف: %s — أكثر من محل معلّق (%d)، لا يمكن الحسم تلقائياً",
+                    recipient_id, len(pending)
+                )
+                return
+            else:
+                logging.warning("[IG] رسالة لمستلم غير معروف: %s", recipient_id)
+                return
     send_account_id = shop["send_account_id"]
     ig_token        = shop["access_token"]
     shop_id         = shop["owner_telegram_id"]  # قد يكون سالباً في بيئة الاختبار
@@ -1498,9 +1514,12 @@ def _ig_oauth_callback():
     except Exception:
         username = ""
 
-    # حفظ في DB (webhook_account_id = send_account_id مبدئياً؛ يُصحَّح تلقائياً عند أول webhook)
+    # حذف أي محل قديم لنفس المالك (تفادي صفوف مكررة عند إعادة الربط)
+    db.delete_ig_shop_by_owner(owner_telegram_id)
+
+    # حفظ في DB (webhook_account_id = "pending:<owner>" مبدئياً؛ يُصحَّح تلقائياً عند أول رسالة حقيقية)
     db.add_ig_shop(
-        webhook_account_id=send_account_id,
+        webhook_account_id=f"pending:{owner_telegram_id}",
         send_account_id=send_account_id,
         access_token=long_token,
         token_expires_at=expires_at,
