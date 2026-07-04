@@ -425,36 +425,86 @@ async def handle_renew_cb(update: Update, _context: ContextTypes.DEFAULT_TYPE):
 # Callback: قبول الطلب (accept_)
 # ────────────────────────────────────────────────────────────
 async def handle_accept_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query    = update.callback_query
+    """معالج أزرار قبول/رفض الطلب (acc:<id> / rej:<id>)."""
+    query = update.callback_query
     await query.answer()
-    order_id = int(query.data.split("_")[1])
-    order    = db.get_order(order_id)
+    data = query.data
+    try:
+        action, oid = data.split(":")
+        order_id = int(oid)
+    except (ValueError, IndexError):
+        return
+
+    order = db.get_order(order_id)
     if order is None:
         await query.answer("الطلب غير موجود.", show_alert=True)
         return
+
     presser = query.from_user.id
-    # تحقق أن الضاغط صاحب المحل أو الأدمن
     if presser != abs(order["shop_id"]) and not db.is_admin(presser):
         return
-    if order["status"] == "accepted":
-        await query.answer("الطلب مقبول مسبقاً.", show_alert=True)
-        return
-    db.mark_order_accepted(order_id)
-    # عدّل رسالة صاحب المحل وأزل الزر
-    try:
-        await query.edit_message_text(query.message.text + "\n\n✅ تم قبول الطلب")
-    except Exception:
-        pass
-    # أبلغ الزبون
-    customer_chat = order.get("customer_chat_id")
-    if customer_chat:
+
+    # بيانات لإشعار الزبون بإنستغرام
+    ig_sender = order.get("ig_sender_id") or ""
+    shop = db.get_ig_shop_by_owner(abs(order["shop_id"]))
+
+    def _notify_ig_customer(text: str):
+        if ig_sender and shop:
+            try:
+                _send_instagram_message_raw(
+                    shop["send_account_id"], shop["access_token"], ig_sender, text
+                )
+            except Exception as e:
+                logging.error("[ORDER] فشل إشعار الزبون بإنستغرام: %s", e)
+
+    # ── رفض ──
+    if action == "rej":
+        if order["status"] in ("accepted", "rejected"):
+            await query.answer("هذا الطلب محسوم مسبقاً.", show_alert=True)
+            return
+        db.reject_order(order_id)
         try:
-            await context.bot.send_message(
-                customer_chat,
-                "تمت رؤية طلبك من قبل المحل ✅ وسيتم التواصل معك قريباً."
-            )
+            await query.edit_message_text(query.message.text + "\n\n❌ تم رفض الطلب")
         except Exception:
             pass
+        _notify_ig_customer("عذراً 🙏 لم نتمكن من تأكيد طلبك حالياً. تواصل معنا لمزيد من المساعدة.")
+        return
+
+    # ── قبول ──
+    if action == "acc":
+        result = db.accept_order(order_id)
+        if not result["ok"]:
+            reason = result["reason"]
+            if reason == "already_accepted":
+                await query.answer("الطلب مقبول مسبقاً.", show_alert=True)
+            elif reason == "already_rejected":
+                await query.answer("الطلب مرفوض مسبقاً.", show_alert=True)
+            elif reason == "out_of_stock":
+                avail = result.get("available", 0)
+                await query.answer(
+                    f"⚠️ نفد المخزون! المتوفر الآن {avail} فقط "
+                    f"(طلبه زبون آخر قبلك).", show_alert=True
+                )
+                try:
+                    await query.edit_message_text(
+                        query.message.text +
+                        f"\n\n⚠️ تعذّر القبول: نفد المخزون (المتوفر {avail})."
+                    )
+                except Exception:
+                    pass
+                _notify_ig_customer(
+                    "عذراً 🙏 نفد هذا المقاس قبل تأكيد طلبك. "
+                    "تواصل معنا لاختيار بديل متوفر."
+                )
+            return
+
+        # نجح القبول والخصم
+        try:
+            await query.edit_message_text(query.message.text + "\n\n✅ تم قبول الطلب وخصم الكمية")
+        except Exception:
+            pass
+        _notify_ig_customer("تم تأكيد طلبك ✅ وهو الآن قيد التجهيز للتوصيل. شكراً لك 🌟")
+        return
 
 
 # ────────────────────────────────────────────────────────────
@@ -1092,7 +1142,7 @@ app.add_handler(CallbackQueryHandler(handle_activation_cb, pattern=r"^(dur|gen|b
 # callbacks التجديد: renew_ / rnwdur_
 app.add_handler(CallbackQueryHandler(handle_renew_cb,      pattern=r"^(renew|rnwdur)_"))
 # callback قبول الطلب
-app.add_handler(CallbackQueryHandler(handle_accept_cb,     pattern=r"^accept_\d+$"))
+app.add_handler(CallbackQueryHandler(handle_accept_cb,     pattern=r"^(acc|rej):\d+$"))
 app.add_handler(add_conv)
 app.add_handler(del_conv)
 app.add_handler(MessageHandler(filters.Regex(r"^📋 عرض السلع$"),             list_products))
@@ -1130,13 +1180,19 @@ def _send_instagram_message_raw(
         return False
 
 
-def send_telegram_message_http(chat_id: int, text: str) -> bool:
+def send_telegram_message_http(chat_id: int, text: str, reply_markup=None) -> bool:
     """إرسال رسالة تيليجرام عبر HTTP مباشرة — يعمل من خيط Flask."""
     if not TOKEN:
         logging.error("[TG-HTTP] TOKEN غير مضبوط")
         return False
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
+    if reply_markup is not None:
+        # حوّل InlineKeyboardMarkup إلى JSON الذي تتوقعه Telegram HTTP API
+        try:
+            payload["reply_markup"] = reply_markup.to_dict()
+        except AttributeError:
+            payload["reply_markup"] = reply_markup
     try:
         r = requests.post(url, json=payload, timeout=10)
         if r.status_code == 200:
@@ -1284,13 +1340,21 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
 
         # سجّل الطلب (لم تُخصم الكمية بعد — تُخصم عند قبول صاحب المحل)
         order_detail = f"{fcode} | {fcolor or 'بلا لون'} | {fsize} | كمية {fqty}"
-        order_id = db.add_order(shop_id, order_detail, name, phone, address, None)
+        order_id = db.add_order(
+            shop_id, fcode, name, phone, address, None,
+            color=fcolor, size=fsize, qty=fqty, ig_sender_id=str(sender_id)
+        )
         db.add_notification(shop_id, "order",
             f"الاسم: {name or '—'} | الهاتف: {phone or '—'} | العنوان: {address or '—'} | "
             f"السلعة: {pname} ({fcode}) | اللون: {fcolor or '—'} | القياس: {fsize} | "
             f"الكمية: {fqty} | المصدر: إنستغرام ({sender_id})", None)
 
         color_line = f"🎨 اللون: {fcolor}\n" if fcolor else ""
+        # أزرار القبول/الرفض تحت الرسالة
+        accept_reject_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ قبول",  callback_data=f"acc:{order_id}"),
+            InlineKeyboardButton("❌ رفض",   callback_data=f"rej:{order_id}"),
+        ]])
         send_telegram_message_http(
             abs(shop_id),
             f"🛒 طلب جديد من إنستغرام\n\n"
@@ -1303,7 +1367,8 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
             f"📞 الهاتف: {phone or '—'}\n"
             f"📍 العنوان: {address or '—'}\n"
             f"🆔 معرّف الزبون (IG): {sender_id}\n\n"
-            f"⏳ الطلب بانتظار قبولك."
+            f"⏳ اضغط قبول أو رفض 👇",
+            reply_markup=accept_reject_kb,
         )
         _send_ig(send_account_id, ig_token, sender_id,
                  "تم استلام طلبك ✅ سيتواصل معك المحل قريباً بعد تأكيد الطلب.")
@@ -1858,12 +1923,6 @@ def _run_web_server() -> None:
     port = int(os.environ.get("PORT", 8080))
     logging.warning("[Webhook] خادم الويب يعمل على المنفذ %d", port)
     _flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
-
-
-threading.Thread(target=_run_web_server, daemon=True).start()
-
-print("Bot is running...")
-app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 threading.Thread(target=_run_web_server, daemon=True).start()
