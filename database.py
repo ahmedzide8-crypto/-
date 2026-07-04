@@ -138,6 +138,19 @@ def init_db() -> None:
                 quantity INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(code, color, size)
             );
+
+            -- حالة الطلب الجاري لكل زبون إنستغرام (تفاعل خطوة بخطوة).
+            -- المفتاح: sender_id (معرّف الزبون على إنستغرام).
+            CREATE TABLE IF NOT EXISTS order_flow (
+                sender_id  TEXT    PRIMARY KEY,
+                shop_id    INTEGER NOT NULL,
+                code       TEXT,
+                color      TEXT,
+                size       TEXT,
+                quantity   INTEGER,
+                step       TEXT    NOT NULL DEFAULT 'idle',
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
         """)
 
         # أضف الأعمدة الجديدة آمناً على قواعد بيانات قائمة
@@ -412,6 +425,66 @@ def has_variants(code: str) -> bool:
             "SELECT 1 FROM variants WHERE code = ? LIMIT 1", (code,)
         ).fetchone()
         return row is not None
+
+
+def get_available_colors(code: str) -> list:
+    """ألوان السلعة التي بها قياس واحد على الأقل متوفر (كمية>0)، دون تكرار."""
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT DISTINCT color FROM variants
+               WHERE code = ? AND quantity > 0 AND color <> ''
+               ORDER BY id""",
+            (code,)
+        ).fetchall()
+        return [r["color"] for r in rows]
+
+
+def get_available_sizes_for_color(code: str, color: str) -> list:
+    """قياسات لون معيّن المتوفرة فعلياً (كمية>0)."""
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT size, quantity FROM variants
+               WHERE code = ? AND LOWER(color) = LOWER(?) AND quantity > 0
+               ORDER BY id""",
+            (code, color)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ────────────────────────────────────────────────────────────
+# حالة الطلب الجاري لزبون إنستغرام
+# ────────────────────────────────────────────────────────────
+def get_order_flow(sender_id: str) -> Optional[dict]:
+    """اجلب حالة الطلب الجاري لزبون، أو None إن لم توجد."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM order_flow WHERE sender_id = ?", (sender_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def set_order_flow(sender_id: str, shop_id: int, step: str,
+                   code: str = None, color: str = None,
+                   size: str = None, quantity: int = None) -> None:
+    """احفظ/حدّث حالة الطلب الجاري لزبون."""
+    import time as _t
+    with _conn() as con:
+        con.execute(
+            """INSERT INTO order_flow
+                   (sender_id, shop_id, code, color, size, quantity, step, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(sender_id) DO UPDATE SET
+                   shop_id=excluded.shop_id, code=excluded.code, color=excluded.color,
+                   size=excluded.size, quantity=excluded.quantity,
+                   step=excluded.step, updated_at=excluded.updated_at""",
+            (sender_id, shop_id, code, color, size, quantity, step, int(_t.time()))
+        )
+
+
+def clear_order_flow(sender_id: str) -> None:
+    """احذف حالة الطلب الجاري لزبون (بعد الإكمال أو الإلغاء)."""
+    with _conn() as con:
+        con.execute("DELETE FROM order_flow WHERE sender_id = ?", (sender_id,))
 
 
 # ────────────────────────────────────────────────────────────
