@@ -4,10 +4,27 @@ import logging
 import sqlite3
 import random
 import string
+import shutil
 from contextlib import contextmanager
 from typing import Optional
 
-DB_FILE = "bot.db"
+# ── مسار قاعدة البيانات ─────────────────────────────────────
+# إذا كان القرص الدائم /data موجوداً (على Railway)، نحفظ فيه لضمان
+# بقاء البيانات بين كل تحديث. غير ذلك (محلياً)، نستخدم ملفاً عادياً.
+_PERSIST_DIR = "/data"
+if os.path.isdir(_PERSIST_DIR):
+    DB_FILE = os.path.join(_PERSIST_DIR, "bot.db")
+    # ترحيل لمرة واحدة: انقل bot.db القديم (من المكان المؤقت) إلى القرص الدائم
+    # فقط إذا كان القديم موجوداً والجديد لم يُنشأ بعد — يمنع فقدان البيانات الحالية.
+    _OLD_DB = "bot.db"
+    if os.path.exists(_OLD_DB) and not os.path.exists(DB_FILE):
+        try:
+            shutil.copy2(_OLD_DB, DB_FILE)
+            logging.warning("[DB-MIGRATE] ✅ نُقلت قاعدة البيانات القديمة إلى القرص الدائم: %s", DB_FILE)
+        except Exception as e:
+            logging.error("[DB-MIGRATE] ❌ فشل نقل قاعدة البيانات القديمة: %s", e)
+else:
+    DB_FILE = "bot.db"
 
 # ── مدد الاشتراك بالأيام — عدّلها هنا فقط ────────────────────
 PLAN_DAYS = {
