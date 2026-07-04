@@ -159,6 +159,15 @@ def init_db() -> None:
             con.execute("ALTER TABLE orders ADD COLUMN customer_chat_id INTEGER")
         if "status" not in existing:
             con.execute("ALTER TABLE orders ADD COLUMN status TEXT NOT NULL DEFAULT 'new'")
+        # أعمدة تفاصيل الطلب (لون/قياس/كمية/معرّف إنستغرام) للخصم الدقيق عند القبول
+        if "order_color" not in existing:
+            con.execute("ALTER TABLE orders ADD COLUMN order_color TEXT DEFAULT ''")
+        if "order_size" not in existing:
+            con.execute("ALTER TABLE orders ADD COLUMN order_size TEXT DEFAULT ''")
+        if "order_qty" not in existing:
+            con.execute("ALTER TABLE orders ADD COLUMN order_qty INTEGER DEFAULT 1")
+        if "ig_sender_id" not in existing:
+            con.execute("ALTER TABLE orders ADD COLUMN ig_sender_id TEXT DEFAULT ''")
 
         admin_id = os.environ.get("ADMIN_TELEGRAM_ID", "").strip()
         if admin_id:
@@ -642,16 +651,22 @@ def add_order(
     customer_phone: str,
     customer_address: str,
     customer_chat_id: int = 0,
+    color: str = "",
+    size: str = "",
+    qty: int = 1,
+    ig_sender_id: str = "",
 ) -> int:
     """سجّل طلب زبون جديد ويُعيد id الطلب"""
     with _conn() as con:
         cur = con.execute(
             """INSERT INTO orders
                (shop_id, product_code, customer_name, customer_phone,
-                customer_address, customer_chat_id)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                customer_address, customer_chat_id,
+                order_color, order_size, order_qty, ig_sender_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (shop_id, product_code, customer_name, customer_phone,
-             customer_address, customer_chat_id),
+             customer_address, customer_chat_id,
+             color, size, qty, ig_sender_id),
         )
         return cur.lastrowid
 
@@ -665,8 +680,71 @@ def get_order(order_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def accept_order(order_id: int) -> dict:
+    """
+    اقبل الطلب: تحقّق من المخزون، اخصم الكمية ذرّياً، علّم الطلب مقبولاً.
+    يُعيد dict فيه: ok (bool)، reason (str)، والطلب.
+    """
+    with _conn() as con:
+        order = con.execute(
+            "SELECT * FROM orders WHERE id = ?", (order_id,)
+        ).fetchone()
+        if order is None:
+            return {"ok": False, "reason": "not_found", "order": None}
+        order = dict(order)
+        if order["status"] == "accepted":
+            return {"ok": False, "reason": "already_accepted", "order": order}
+        if order["status"] == "rejected":
+            return {"ok": False, "reason": "already_rejected", "order": order}
+
+        code  = order["product_code"]
+        color = order["order_color"] or ""
+        size  = order["order_size"] or ""
+        qty   = order["order_qty"] or 1
+
+        # لو السلعة لها مخزون (variants)، تحقّق واخصم ذرّياً
+        has_var = con.execute(
+            "SELECT 1 FROM variants WHERE code = ? LIMIT 1", (code,)
+        ).fetchone() is not None
+
+        if has_var:
+            row = con.execute(
+                """SELECT quantity FROM variants
+                   WHERE code = ? AND LOWER(color)=LOWER(?) AND LOWER(size)=LOWER(?)""",
+                (code, color, size)
+            ).fetchone()
+            avail = row["quantity"] if row else 0
+            if avail < qty:
+                # نفد المخزون بين الطلب والقبول
+                return {"ok": False, "reason": "out_of_stock",
+                        "available": avail, "order": order}
+            con.execute(
+                """UPDATE variants SET quantity = quantity - ?
+                   WHERE code = ? AND LOWER(color)=LOWER(?) AND LOWER(size)=LOWER(?)""",
+                (qty, code, color, size)
+            )
+
+        con.execute("UPDATE orders SET status='accepted' WHERE id = ?", (order_id,))
+        return {"ok": True, "reason": "accepted", "order": order}
+
+
+def reject_order(order_id: int) -> Optional[dict]:
+    """ارفض الطلب (لا يمسّ المخزون). يُعيد الطلب أو None."""
+    with _conn() as con:
+        order = con.execute(
+            "SELECT * FROM orders WHERE id = ?", (order_id,)
+        ).fetchone()
+        if order is None:
+            return None
+        order = dict(order)
+        if order["status"] in ("accepted", "rejected"):
+            return order  # لا نغيّر حالة نهائية
+        con.execute("UPDATE orders SET status='rejected' WHERE id = ?", (order_id,))
+        return order
+
+
 def mark_order_accepted(order_id: int) -> None:
-    """علّم الطلب مقبولاً"""
+    """(قديمة — للتوافق) علّم الطلب مقبولاً"""
     with _conn() as con:
         con.execute(
             "UPDATE orders SET status = 'accepted' WHERE id = ?", (order_id,)
