@@ -177,6 +177,14 @@ def init_db() -> None:
             con.execute("ALTER TABLE orders ADD COLUMN order_qty INTEGER DEFAULT 1")
         if "ig_sender_id" not in existing:
             con.execute("ALTER TABLE orders ADD COLUMN ig_sender_id TEXT DEFAULT ''")
+        # أعمدة بيانات الزبون المؤقتة في order_flow (تُستخدم أثناء تأكيد الطلب)
+        of_cols = {row["name"] for row in con.execute("PRAGMA table_info(order_flow)").fetchall()}
+        if "cust_name" not in of_cols:
+            con.execute("ALTER TABLE order_flow ADD COLUMN cust_name TEXT DEFAULT ''")
+        if "cust_phone" not in of_cols:
+            con.execute("ALTER TABLE order_flow ADD COLUMN cust_phone TEXT DEFAULT ''")
+        if "cust_address" not in of_cols:
+            con.execute("ALTER TABLE order_flow ADD COLUMN cust_address TEXT DEFAULT ''")
 
         admin_id = os.environ.get("ADMIN_TELEGRAM_ID", "").strip()
         if admin_id:
@@ -505,6 +513,30 @@ def clear_order_flow(sender_id: str) -> None:
         con.execute("DELETE FROM order_flow WHERE sender_id = ?", (sender_id,))
 
 
+def set_order_customer(sender_id: str, name: str, phone: str, address: str) -> None:
+    """خزّن بيانات الزبون مؤقتاً في order_flow أثناء انتظار تأكيد الطلب."""
+    with _conn() as con:
+        con.execute(
+            """UPDATE order_flow
+               SET cust_name = ?, cust_phone = ?, cust_address = ?
+               WHERE sender_id = ?""",
+            (name or "", phone or "", address or "", sender_id)
+        )
+
+
+def get_order_customer(sender_id: str) -> Optional[dict]:
+    """اجلب بيانات الزبون المخزّنة مؤقتاً (اسم/هاتف/عنوان)."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT cust_name, cust_phone, cust_address FROM order_flow WHERE sender_id = ?",
+            (sender_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {"name": row["cust_name"], "phone": row["cust_phone"],
+                "address": row["cust_address"]}
+
+
 # ────────────────────────────────────────────────────────────
 # تعطيل/تفعيل الرد الآلي لزبون معيّن (لكل محل+زبون)
 # ────────────────────────────────────────────────────────────
@@ -550,6 +582,24 @@ def is_auto_reply_disabled(shop_id: int, customer_ig_id: str) -> bool:
             )
             return False
         return True
+
+
+def pop_expired_handoffs() -> list:
+    """
+    يجلب الحالات المنتهية (مضى وقتها) ويحذفها، لإرسال نقطة تنبيه للزبون.
+    يُعيد قائمة [(shop_id, customer_ig_id)] للحالات التي انتهت الآن.
+    """
+    import time as _t
+    now = int(_t.time())
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT shop_id, customer_ig_id FROM auto_reply_state WHERE disabled_until <= ?",
+            (now,)
+        ).fetchall()
+        expired = [(r["shop_id"], r["customer_ig_id"]) for r in rows]
+        if expired:
+            con.execute("DELETE FROM auto_reply_state WHERE disabled_until <= ?", (now,))
+        return expired
 
 
 # ────────────────────────────────────────────────────────────
