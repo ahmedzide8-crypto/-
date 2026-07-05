@@ -59,8 +59,8 @@ else:
     logging.error("[STARTUP] ADMIN_TELEGRAM_ID غير مضبوط في البيئة!")
 
 # ── حالات المحادثة ───────────────────────────────────────────
-(ASK_NAME, ASK_PRICE, ASK_SIZES, ASK_HAS_COLORS, ASK_COLOR_NAME,
- ASK_COLOR_QTYS, ASK_MORE_COLORS, CONFIRM_ADD, ASK_DEL_CODE) = range(9)
+(ASK_NAME, ASK_PRICE, ASK_HAS_SIZES, ASK_SIZES, ASK_HAS_COLORS, ASK_COLOR_NAME,
+ ASK_COLOR_QTYS, ASK_MORE_COLORS, ASK_SIMPLE_QTY, CONFIRM_ADD, ASK_DEL_CODE) = range(11)
 
 # ── تسميات المدد للعرض ───────────────────────────────────────
 PLAN_LABELS = {
@@ -661,42 +661,94 @@ async def got_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ السعر يجب أن يكون رقماً. أعد الإدخال:")
         return ASK_PRICE
     context.user_data["price"] = price
-    await update.message.reply_text("القياسات مفصولة بفاصلة (مثال: S,M,L,XL):")
-    return ASK_SIZES
+    context.user_data["variants"] = []
+    yn_kb = ReplyKeyboardMarkup(
+        [["نعم", "لا"]], resize_keyboard=True, one_time_keyboard=True
+    )
+    await update.message.reply_text(
+        "📐  هل للسلعة قياسات؟\n"
+        "(مثل ملابس أو أحذية)",
+        reply_markup=yn_kb,
+    )
+    return ASK_HAS_SIZES
+
+
+async def got_has_sizes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ans = update.message.text.strip()
+    if "نعم" in ans:
+        await update.message.reply_text(
+            "📐  اكتب القياسات مفصولة بفاصلة\n"
+            "أمثلة:  S, M, L   أو   40, 41, 42",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ASK_SIZES
+    # بلا قياسات → قياس فارغ واحد، ثم اسأل عن الألوان
+    context.user_data["sizes"] = [""]
+    yn_kb = ReplyKeyboardMarkup(
+        [["نعم", "لا"]], resize_keyboard=True, one_time_keyboard=True
+    )
+    await update.message.reply_text(
+        "🎨  هل للسلعة ألوان؟",
+        reply_markup=yn_kb,
+    )
+    return ASK_HAS_COLORS
 
 
 async def got_sizes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sizes = [s.strip() for s in update.message.text.split(",") if s.strip()]
     if not sizes:
-        await update.message.reply_text("❌ أدخل قياساً واحداً على الأقل (مثال: S,M,L):")
+        await update.message.reply_text("❌ أدخل قياساً واحداً على الأقل:")
         return ASK_SIZES
     context.user_data["sizes"] = sizes
-    context.user_data["variants"] = []   # سنملؤها لوناً بلون
     yn_kb = ReplyKeyboardMarkup(
         [["نعم", "لا"]], resize_keyboard=True, one_time_keyboard=True
     )
     await update.message.reply_text(
-        "🎨 هل تتوفر السلعة بأكثر من لون؟", reply_markup=yn_kb
+        "🎨  هل تتوفر السلعة بأكثر من لون؟", reply_markup=yn_kb
     )
     return ASK_HAS_COLORS
 
 
 async def got_has_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ans = update.message.text.strip()
+    sizes = context.user_data["sizes"]
+    has_real_sizes = sizes != [""]
     if "نعم" in ans:
         await update.message.reply_text(
             "اكتب اسم اللون الأول:", reply_markup=ReplyKeyboardRemove()
         )
         return ASK_COLOR_NAME
-    # بلا ألوان: نطلب كمية إجمالية واحدة (تُخزَّن كلون افتراضي فارغ لكل قياس)
+    # بلا ألوان
+    context.user_data["current_color"] = ""
+    if has_real_sizes:
+        await update.message.reply_text(
+            "📦 كم الكمية المتوفرة من كل قياس؟\n"
+            "اكتب رقماً واحداً لكل القياسات، أو أرقاماً مفصولة بفاصلة بترتيب القياسات.\n"
+            f"القياسات: {', '.join(sizes)}",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ASK_COLOR_QTYS
+    # بلا قياسات وبلا ألوان → كمية إجمالية واحدة
     await update.message.reply_text(
-        "📦 كم الكمية المتوفرة من كل قياس؟\n"
-        "اكتب رقماً واحداً لكل القياسات، أو أرقاماً مفصولة بفاصلة بترتيب القياسات.\n"
-        f"القياسات: {', '.join(context.user_data['sizes'])}",
+        "📦  كم الكمية المتوفرة؟  اكتب رقماً 👇",
         reply_markup=ReplyKeyboardRemove()
     )
-    context.user_data["current_color"] = ""   # لون افتراضي (بلا لون)
-    return ASK_COLOR_QTYS
+    return ASK_SIMPLE_QTY
+
+
+async def got_simple_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """كمية السلعة بلا قياس/لون → مباشرة للملخص."""
+    text = update.message.text.strip()
+    try:
+        qty = int(text)
+    except ValueError:
+        await update.message.reply_text("❌  اكتب رقماً صحيحاً للكمية 👇")
+        return ASK_SIMPLE_QTY
+    if qty < 0:
+        await update.message.reply_text("❌  الكمية يجب أن تكون 0 أو أكثر 👇")
+        return ASK_SIMPLE_QTY
+    context.user_data["variants"] = [{"color": "", "size": "", "quantity": qty}]
+    return await _show_add_summary(update, context)
 
 
 async def got_color_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -765,30 +817,41 @@ async def got_more_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _show_add_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name   = context.user_data["name"]
     price  = context.user_data["price"]
-    sizes  = context.user_data["sizes"]
     variants = context.user_data["variants"]
+    ptype  = context.user_data.get("product_type", "clothing")
+
+    type_label = {"clothing": "👕 ملابس", "shoes": "👟 أحذية", "simple": "📦 منتج بسيط"}.get(ptype, "")
 
     lines = [
-        "📋 ملخص السلعة:",
-        f"📦 الاسم: {name}",
-        f"💰 السعر: {price}",
-        f"📐 القياسات: {', '.join(sizes)}",
+        "📋  ملخص السلعة",
+        "━━━━━━━━━━━━━━",
+        f"📦  الاسم:  {name}",
+        f"💰  السعر:  {price}",
+        f"🏷️  النوع:  {type_label}",
     ]
-    # ملخّص الكميات
-    has_colors = any(v["color"] for v in variants)
-    if has_colors:
-        lines.append("\n🎨 الألوان والكميات:")
-        # اجمع حسب اللون
-        by_color = {}
-        for v in variants:
-            by_color.setdefault(v["color"], []).append(f"{v['size']}:{v['quantity']}")
-        for color, items in by_color.items():
-            lines.append(f"  • {color} — {', '.join(items)}")
-    else:
-        lines.append("\n📦 الكميات لكل قياس:")
-        lines.append("  " + ", ".join(f"{v['size']}:{v['quantity']}" for v in variants))
 
-    lines.append("\nتأكيد الحفظ؟")
+    if ptype == "simple":
+        # منتج بسيط: كمية واحدة فقط
+        qty = variants[0]["quantity"] if variants else 0
+        lines.append(f"🔢  الكمية:  {qty}")
+    else:
+        sizes = context.user_data["sizes"]
+        lines.append(f"📐  القياسات:  {', '.join(sizes)}")
+        lines.append("━━━━━━━━━━━━━━")
+        has_colors = any(v["color"] for v in variants)
+        if has_colors:
+            lines.append("🎨  الألوان والكميات:")
+            by_color = {}
+            for v in variants:
+                by_color.setdefault(v["color"], []).append(f"{v['size']}:{v['quantity']}")
+            for color, items in by_color.items():
+                lines.append(f"   • {color}  —  {'، '.join(items)}")
+        else:
+            lines.append("🔢  الكميات لكل قياس:")
+            lines.append("   " + "،  ".join(f"{v['size']}:{v['quantity']}" for v in variants))
+
+    lines.append("━━━━━━━━━━━━━━")
+    lines.append("تأكيد الحفظ؟")
     confirm_kb = ReplyKeyboardMarkup(
         [["✅ نعم", "❌ لا"]], resize_keyboard=True, one_time_keyboard=True
     )
@@ -1215,11 +1278,13 @@ add_conv = ConversationHandler(
     states={
         ASK_NAME:        [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
         ASK_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, got_price)],
+        ASK_HAS_SIZES:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_has_sizes)],
         ASK_SIZES:       [MessageHandler(filters.TEXT & ~filters.COMMAND, got_sizes)],
         ASK_HAS_COLORS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_has_colors)],
         ASK_COLOR_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_color_name)],
         ASK_COLOR_QTYS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_color_qtys)],
         ASK_MORE_COLORS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_more_colors)],
+        ASK_SIMPLE_QTY:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_simple_qty)],
         CONFIRM_ADD:     [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_save)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
@@ -1363,8 +1428,20 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
             db.set_order_flow(sender_id, shop_id, "await_color", code=code)
             return True
 
-        # حالة: بمخزون بلا ألوان → اعرض القياسات المتوفرة مباشرة
+        # حالة: بمخزون بلا ألوان
         if sizes_no_color:
+            # منتج بسيط: قياس واحد فارغ → تخطّى سؤال القياس، اذهب للكمية مباشرة
+            if len(sizes_no_color) == 1 and sizes_no_color[0]["size"] == "":
+                avail = sizes_no_color[0]["quantity"]
+                _send_ig(send_account_id, ig_token, sender_id,
+                         f"📦  {product['name']}\n"
+                         f"💰  السعر:  {product['price']}\n"
+                         f"الحالة:  {_stock_phrase(avail)}\n\n"
+                         f"كم الكمية التي تريدها؟ اكتب رقماً 👇")
+                db.set_order_flow(sender_id, shop_id, "await_qty",
+                                  code=code, color="", size="")
+                return True
+            # أحذية/قياسات بلا ألوان: اعرض القياسات
             lines = [f"📦 {product['name']}", f"💰 السعر: {product['price']}", ""]
             lines.append("📐 القياسات المتوفرة:")
             for s in sizes_no_color:
@@ -1440,9 +1517,15 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
                          "اكتب كمية أقل 👇")
             return True
         # الكمية صالحة → اطلب بيانات التوصيل
-        color_txt = f"اللون: {fcolor} | " if fcolor else ""
+        parts = []
+        if fcolor:
+            parts.append(f"اللون: {fcolor}")
+        if fsize:
+            parts.append(f"القياس: {fsize}")
+        parts.append(f"الكمية: {qty}")
+        choice_line = "  |  ".join(parts)
         _send_ig(send_account_id, ig_token, sender_id,
-                 f"✅ اخترت:\n{color_txt}القياس: {fsize} | الكمية: {qty}\n\n"
+                 f"✅ اخترت:\n{choice_line}\n\n"
                  f"لإتمام الطلب، أرسل بهذا الشكل:\n"
                  f"الاسم / رقم الهاتف / العنوان")
         db.set_order_flow(sender_id, shop_id, "await_details",
@@ -1481,13 +1564,14 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
             InlineKeyboardButton("✅ قبول",  callback_data=f"acc:{order_id}"),
             InlineKeyboardButton("❌ رفض",   callback_data=f"rej:{order_id}"),
         ]])
+        size_line = f"📐  القياس:  {fsize}\n" if fsize else ""
         send_telegram_message_http(
             abs(shop_id),
             f"🛒  طلب جديد\n"
             f"━━━━━━━━━━━━━━\n"
             f"📦  {pname}  ·  {fcode}\n"
             f"{color_line}"
-            f"📐  القياس:  {fsize}\n"
+            f"{size_line}"
             f"🔢  الكمية:  {fqty}\n"
             f"💰  السعر:  {pprice}\n"
             f"━━━━━━━━━━━━━━\n"
