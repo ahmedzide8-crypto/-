@@ -791,7 +791,8 @@ def accept_order(order_id: int) -> dict:
             ).fetchone()
             avail = row["quantity"] if row else 0
             if avail < qty:
-                # نفد المخزون بين الطلب والقبول
+                # نفد المخزون بين الطلب والقبول — علّمه كحالة خاصة كي لا يبقى معلّقاً للأبد
+                con.execute("UPDATE orders SET status='out_of_stock' WHERE id = ?", (order_id,))
                 return {"ok": False, "reason": "out_of_stock",
                         "available": avail, "order": order}
             con.execute(
