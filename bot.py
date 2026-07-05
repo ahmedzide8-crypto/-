@@ -1125,7 +1125,7 @@ async def handle_pending_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for o in orders:
         prod = db.get_product(o["product_code"])
         pname = prod["name"] if prod else o["product_code"]
-        color_line = f"🎨 اللون: {o['order_color']}\n" if o.get("order_color") else ""
+        color_line = f"🎨  اللون:  {o['order_color']}\n" if o.get("order_color") else ""
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ قبول", callback_data=f"acc:{o['id']}"),
             InlineKeyboardButton("❌ رفض",  callback_data=f"rej:{o['id']}"),
@@ -1133,15 +1133,18 @@ async def handle_pending_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 abs(shop_id),
-                f"🛒 طلب معلّق #{o['id']}\n\n"
-                f"📦 السلعة: {pname} ({o['product_code']})\n"
+                f"🛒  طلب معلّق  ·  #{o['id']}\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"📦  {pname}  ·  {o['product_code']}\n"
                 f"{color_line}"
-                f"📐 القياس: {o.get('order_size') or '—'}\n"
-                f"🔢 الكمية: {o.get('order_qty') or 1}\n\n"
-                f"👤 الاسم: {o['customer_name'] or '—'}\n"
-                f"📞 الهاتف: {o['customer_phone'] or '—'}\n"
-                f"📍 العنوان: {o['customer_address'] or '—'}\n\n"
-                f"⏳ اضغط قبول أو رفض 👇",
+                f"📐  القياس:  {o.get('order_size') or '—'}\n"
+                f"🔢  الكمية:  {o.get('order_qty') or 1}\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"👤  {o['customer_name'] or '—'}\n"
+                f"📞  {o['customer_phone'] or '—'}\n"
+                f"📍  {o['customer_address'] or '—'}\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"اضغط قبول أو رفض  👇",
                 reply_markup=kb,
             )
         except Exception as e:
@@ -1472,7 +1475,7 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
             f"السلعة: {pname} ({fcode}) | اللون: {fcolor or '—'} | القياس: {fsize} | "
             f"الكمية: {fqty} | المصدر: إنستغرام ({sender_id})", None)
 
-        color_line = f"🎨 اللون: {fcolor}\n" if fcolor else ""
+        color_line = f"🎨  اللون:  {fcolor}\n" if fcolor else ""
         # أزرار القبول/الرفض تحت الرسالة
         accept_reject_kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ قبول",  callback_data=f"acc:{order_id}"),
@@ -1480,17 +1483,19 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
         ]])
         send_telegram_message_http(
             abs(shop_id),
-            f"🛒 طلب جديد من إنستغرام\n\n"
-            f"📦 السلعة: {pname} ({fcode})\n"
+            f"🛒  طلب جديد\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📦  {pname}  ·  {fcode}\n"
             f"{color_line}"
-            f"📐 القياس: {fsize}\n"
-            f"🔢 الكمية: {fqty}\n"
-            f"💰 السعر: {pprice}\n\n"
-            f"👤 الاسم: {name or '—'}\n"
-            f"📞 الهاتف: {phone or '—'}\n"
-            f"📍 العنوان: {address or '—'}\n"
-            f"🆔 معرّف الزبون (IG): {sender_id}\n\n"
-            f"⏳ اضغط قبول أو رفض 👇",
+            f"📐  القياس:  {fsize}\n"
+            f"🔢  الكمية:  {fqty}\n"
+            f"💰  السعر:  {pprice}\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"👤  {name or '—'}\n"
+            f"📞  {phone or '—'}\n"
+            f"📍  {address or '—'}\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"اضغط قبول أو رفض  👇",
             reply_markup=accept_reject_kb,
         )
         _send_ig(send_account_id, ig_token, sender_id,
