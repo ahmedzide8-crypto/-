@@ -151,6 +151,15 @@ def init_db() -> None:
                 step       TEXT    NOT NULL DEFAULT 'idle',
                 updated_at INTEGER NOT NULL DEFAULT 0
             );
+
+            -- تعطيل الرد الآلي لزبون معيّن (لكل محل+زبون على حدة).
+            -- disabled_until = الوقت (epoch) الذي يعود بعده الرد الآلي تلقائياً.
+            CREATE TABLE IF NOT EXISTS auto_reply_state (
+                shop_id        INTEGER NOT NULL,
+                customer_ig_id TEXT    NOT NULL,
+                disabled_until INTEGER NOT NULL,
+                PRIMARY KEY (shop_id, customer_ig_id)
+            );
         """)
 
         # أضف الأعمدة الجديدة آمناً على قواعد بيانات قائمة
@@ -497,6 +506,53 @@ def clear_order_flow(sender_id: str) -> None:
 
 
 # ────────────────────────────────────────────────────────────
+# تعطيل/تفعيل الرد الآلي لزبون معيّن (لكل محل+زبون)
+# ────────────────────────────────────────────────────────────
+def disable_auto_reply(shop_id: int, customer_ig_id: str, hours: int = 24) -> None:
+    """عطّل الرد الآلي لزبون معيّن لمدة (افتراضياً 24 ساعة)."""
+    import time as _t
+    until = int(_t.time()) + hours * 3600
+    with _conn() as con:
+        con.execute(
+            """INSERT INTO auto_reply_state (shop_id, customer_ig_id, disabled_until)
+               VALUES (?, ?, ?)
+               ON CONFLICT(shop_id, customer_ig_id)
+               DO UPDATE SET disabled_until = excluded.disabled_until""",
+            (shop_id, str(customer_ig_id), until)
+        )
+
+
+def enable_auto_reply(shop_id: int, customer_ig_id: str) -> None:
+    """أعد تفعيل الرد الآلي لزبون (احذف حالة التعطيل)."""
+    with _conn() as con:
+        con.execute(
+            "DELETE FROM auto_reply_state WHERE shop_id = ? AND customer_ig_id = ?",
+            (shop_id, str(customer_ig_id))
+        )
+
+
+def is_auto_reply_disabled(shop_id: int, customer_ig_id: str) -> bool:
+    """هل الرد الآلي معطّل لهذا الزبون الآن؟ (يعود تلقائياً بعد انتهاء المدة)."""
+    import time as _t
+    with _conn() as con:
+        row = con.execute(
+            "SELECT disabled_until FROM auto_reply_state "
+            "WHERE shop_id = ? AND customer_ig_id = ?",
+            (shop_id, str(customer_ig_id))
+        ).fetchone()
+        if row is None:
+            return False
+        if int(_t.time()) >= row["disabled_until"]:
+            # انتهت المدة → احذف الحالة وأعد التفعيل تلقائياً
+            con.execute(
+                "DELETE FROM auto_reply_state WHERE shop_id = ? AND customer_ig_id = ?",
+                (shop_id, str(customer_ig_id))
+            )
+            return False
+        return True
+
+
+# ────────────────────────────────────────────────────────────
 # توليد كود السلعة
 # ────────────────────────────────────────────────────────────
 def generate_unique_code() -> str:
@@ -678,6 +734,26 @@ def get_order(order_id: int) -> Optional[dict]:
             "SELECT * FROM orders WHERE id = ?", (order_id,)
         ).fetchone()
         return dict(row) if row else None
+
+
+def count_pending_orders_by_shop() -> dict:
+    """عدد الطلبات المعلّقة (لم تُقبل ولم تُرفض) لكل محل. يُعيد {shop_id: count}."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT shop_id, COUNT(*) AS n FROM orders "
+            "WHERE status = 'new' GROUP BY shop_id"
+        ).fetchall()
+        return {r["shop_id"]: r["n"] for r in rows}
+
+
+def get_pending_orders_for_shop(shop_id: int) -> list:
+    """اجلب الطلبات المعلّقة لمحل معيّن (الأحدث أولاً)."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM orders WHERE shop_id = ? AND status = 'new' "
+            "ORDER BY id DESC", (shop_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def accept_order(order_id: int) -> dict:
