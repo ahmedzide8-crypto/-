@@ -1231,15 +1231,32 @@ async def handle_autoreply_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if action == "aroff":
         db.disable_auto_reply(shop_id, cust_ig, hours=24)
+        # أرسل نقطة فورية للزبون لرفع محادثته لأعلى قائمة إنستغرام
+        shop = db.get_ig_shop_by_owner(abs(shop_id))
+        dot_sent = False
+        if shop:
+            try:
+                _send_instagram_message_raw(
+                    shop["send_account_id"], shop["access_token"], cust_ig, "."
+                )
+                dot_sent = True
+            except Exception as e:
+                logging.error("[AUTO-REPLY] فشل إرسال النقطة للزبون %s: %s", cust_ig, e)
         enable_kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔊 أعد تفعيل الرد الآلي",
                                  callback_data=f"aron:{cust_ig}")
         ]])
+        dot_line = (
+            "📨  أرسلتُ نقطة (.) للزبون — محادثته الآن ضمن أول 3 محادثات 🔝\n"
+            if dot_sent else ""
+        )
         try:
             await query.edit_message_text(
                 query.message.text +
-                "\n\n🔇 تم إيقاف الرد الآلي لهذا الزبون (24 ساعة).\n"
-                "سيعود تلقائياً بعد 24 ساعة، أو أعده الآن 👇",
+                "\n\n🔇 أوقفتُ الرد الآلي لهذا الزبون.\n"
+                f"{dot_line}"
+                "رد عليه يدوياً من إنستغرام، وأعد الرد الآلي عند انتهائك 👇\n"
+                "(وإلا سيعود تلقائياً بعد 24 ساعة)",
                 reply_markup=enable_kb,
             )
         except Exception:
@@ -1257,6 +1274,22 @@ async def handle_autoreply_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
 
+async def job_reenable_handoff(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    عند انتهاء مدة تعطيل الرد الآلي (24 ساعة): يُعيد الرد الآلي ويُخبر صاحب المحل.
+    (النقطة تُرسل للزبون فور ضغط صاحب المحل على زر "سأرد"، لا هنا.)
+    """
+    expired = db.pop_expired_handoffs()
+    for shop_id, customer_ig in expired:
+        try:
+            await context.bot.send_message(
+                abs(shop_id),
+                "🔊  عاد الرد الآلي لأحد الزبائن تلقائياً (مرّت 24 ساعة على إيقافه).",
+            )
+        except Exception as e:
+            logging.error("[HANDOFF-JOB] فشل إخبار المحل %s: %s", shop_id, e)
+
+
 async def _post_init(application) -> None:
     jq = application.job_queue
     jq.run_daily(job_expire_shops,      _time(0, 5))
@@ -1264,6 +1297,8 @@ async def _post_init(application) -> None:
     jq.run_daily(job_refresh_ig_tokens, _time(3, 0))
     # تذكير الطلبات المعلّقة كل ساعتين (أول تشغيل بعد دقيقتين من الإقلاع)
     jq.run_repeating(job_pending_orders, interval=2 * 60 * 60, first=120)
+    # فحص انتهاء تعطيل الرد الآلي كل 15 دقيقة (يعيد الرد الآلي + يخبر المحل، بلا نقطة)
+    jq.run_repeating(job_reenable_handoff, interval=15 * 60, first=180)
 
 
 # ────────────────────────────────────────────────────────────
@@ -1547,6 +1582,60 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
         pname = prod["name"] if prod else fcode
         pprice = prod["price"] if prod else "—"
 
+        # خزّن البيانات مؤقتاً واطلب التأكيد (لا نسجّل الطلب بعد)
+        db.set_order_flow(sender_id, shop_id, "await_confirm",
+                          code=fcode, color=fcolor, size=fsize, quantity=fqty)
+        db.set_order_customer(sender_id, name, phone, address)
+
+        parts = [f"📦  {pname}"]
+        if fcolor: parts.append(f"🎨  {fcolor}")
+        if fsize:  parts.append(f"📐  {fsize}")
+        parts.append(f"🔢  الكمية: {fqty}")
+        parts.append(f"💰  السعر: {pprice}")
+        summary = "\n".join(parts)
+        _send_ig(send_account_id, ig_token, sender_id,
+                 f"📝  مراجعة طلبك:\n"
+                 f"━━━━━━━━━━\n"
+                 f"{summary}\n"
+                 f"━━━━━━━━━━\n"
+                 f"👤  {name or '—'}\n"
+                 f"📞  {phone or '—'}\n"
+                 f"📍  {address or '—'}\n"
+                 f"━━━━━━━━━━\n"
+                 f"لتأكيد الطلب اكتب:  تأكيد\n"
+                 f"لإلغائه اكتب:  لا")
+        return True
+
+    if step == "await_confirm":
+        ans = text_stripped.lower()
+        confirm_words = ["تأكيد", "نعم", "اي", "أي", "ايي", "تاكيد", "اوك", "ok", "yes", "أكد", "اكد"]
+        cancel_words  = ["لا", "الغاء", "إلغاء", "الغي", "لأ", "no", "cancel"]
+        is_confirm = any(w in ans for w in confirm_words)
+        is_cancel  = any(w == ans or w in ans for w in cancel_words)
+
+        if is_cancel and not is_confirm:
+            db.clear_order_flow(sender_id)
+            _send_ig(send_account_id, ig_token, sender_id,
+                     "تم إلغاء الطلب 🙏 لو حبيت تطلب مرة ثانية، أرسل كود السلعة.")
+            return True
+        if not is_confirm:
+            _send_ig(send_account_id, ig_token, sender_id,
+                     "لتأكيد الطلب اكتب:  تأكيد\nلإلغائه اكتب:  لا")
+            return True
+
+        # تأكيد → سجّل الطلب فعلياً
+        fcode  = flow["code"]
+        fcolor = flow["color"] or ""
+        fsize  = flow["size"]
+        fqty   = flow["quantity"]
+        cust   = db.get_order_customer(sender_id) or {}
+        name    = cust.get("name", "")
+        phone   = cust.get("phone", "")
+        address = cust.get("address", "")
+        prod = db.get_product(fcode)
+        pname = prod["name"] if prod else fcode
+        pprice = prod["price"] if prod else "—"
+
         # سجّل الطلب (لم تُخصم الكمية بعد — تُخصم عند قبول صاحب المحل)
         order_detail = f"{fcode} | {fcolor or 'بلا لون'} | {fsize} | كمية {fqty}"
         order_id = db.add_order(
@@ -1629,24 +1718,33 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
 
     # فحص: هل الرد الآلي معطّل لهذا الزبون؟ (من قاعدة البيانات — يثبت بين التحديثات)
     if db.is_auto_reply_disabled(shop_id, sender_id):
-        logging.warning("[AUTO-REPLY] الرد معطّل للزبون %s — تجاهل + تنبيه صاحب المحل", sender_id)
-        db.add_notification(
-            shop_id, "inquiry",
-            f"📩 [الرد الآلي معطّل] رسالة من الزبون: {text.strip()}", None
-        )
-        enable_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔊 أعد تفعيل الرد الآلي",
-                                 callback_data=f"aron:{sender_id}")
-        ]])
-        send_telegram_message_http(
-            abs(shop_id),
-            f"📩 رسالة من زبون (الرد الآلي معطّل له):\n"
-            f"«{text.strip()}»\n"
-            f"🆔 معرّف الزبون (IG): {sender_id}\n\n"
-            f"رد عليه يدوياً من إنستغرام، وأعد تفعيل الرد الآلي عند الانتهاء 👇",
-            reply_markup=enable_kb,
-        )
-        return
+        # استثناء: لو الزبون يُكمل طلباً (بمنتصف تدفق طلب، أو أرسل بيانات فيها رقم هاتف)
+        # نسمح بتسجيل الطلب رغم أن الرد الآلي معطّل — حتى لا يضيع الطلب.
+        _in_order_flow = db.get_order_flow(sender_id) is not None
+        _looks_like_order = bool(_RE_PHONE.search(text.strip()))
+        if not (_in_order_flow or _looks_like_order):
+            logging.warning("[AUTO-REPLY] الرد معطّل للزبون %s — تجاهل + تنبيه صاحب المحل", sender_id)
+            db.add_notification(
+                shop_id, "inquiry",
+                f"📩 [الرد الآلي معطّل] رسالة من الزبون: {text.strip()}", None
+            )
+            enable_kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔊 أعد تفعيل الرد الآلي",
+                                     callback_data=f"aron:{sender_id}")
+            ]])
+            send_telegram_message_http(
+                abs(shop_id),
+                f"📩  رسالة من زبون  (الرد الآلي متوقف له)\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💬  {text.strip()}\n"
+                f"🆔  {sender_id}\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"رد عليه يدوياً، وأعد تفعيل الرد الآلي عند الانتهاء 👇",
+                reply_markup=enable_kb,
+            )
+            return
+        # غير ذلك: نكمل (الزبون يُنهي طلباً) — لا نتجاهل.
+        logging.warning("[AUTO-REPLY] الرد معطّل لكن الزبون %s يُكمل طلباً — نسمح بالتسجيل", sender_id)
 
     text_stripped = text.strip()
     text_up = text_stripped.upper()
@@ -1786,16 +1884,26 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
     logging.warning("[IG-NOTIF] أحفظ إشعار لـ shop_id=%s kind=inquiry", shop_id)
     db.add_notification(shop_id, "inquiry", f"[إنستغرام {sender_id}] {text_stripped}", None)
     logging.warning("[IG-NOTIF] ✅ حُفظ الإشعار")
+    reply_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🙋 سأرد على الزبون",
+                             callback_data=f"aroff:{sender_id}")
+    ]])
     send_telegram_message_http(
         abs(shop_id),
-        f"❓ استفسار من إنستغرام\n{text_stripped}\nمعرّف الزبون (IG): {sender_id}"
+        f"❓  استفسار من زبون\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"💬  {text_stripped}\n"
+        f"🆔  {sender_id}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"اضغط لترد بنفسك (يوقف الرد الآلي لهذا الزبون) 👇",
+        reply_markup=reply_kb,
     )
     _send_instagram_message_raw(send_account_id, ig_token, sender_id,
         "شكراً لتواصلك معنا 🙏\n"
-        "سؤالك وصل لصاحب المحل وسيرد عليك في أقرب وقت.\n\n"
-        "في هذي الأثناء يمكنك:\n"
-        "• إرسال كود السلعة لمعرفة تفاصيلها وسعرها (مثل: AB-1234)\n"
-        "• كتابة (تحدث مع إنسان) للتواصل المباشر مع صاحب المحل"
+        "سؤالك وصل لصاحب المحل وسيرد عليك قريباً.\n\n"
+        "ولو حبيت تطلب سلعة، أرسل بياناتك بهذا الشكل:\n"
+        "الاسم / رقم الهاتف / العنوان\n"
+        "وسيتم تسجيل طلبك ✅"
     )
 
 
@@ -1820,6 +1928,35 @@ def _ig_verify():
 
 
 @_flask_app.route("/webhook", methods=["POST"])
+def _handle_owner_manual_reply(shop_ig_id: str, customer_ig: str) -> None:
+    """
+    كُشف رد يدوي من صاحب المحل على زبون (عبر echo).
+    يعطّل الرد الآلي لهذا الزبون تلقائياً، ويُنبّه صاحب المحل مرة واحدة.
+    """
+    shop = db.get_ig_shop_by_send_account_id(shop_ig_id) or db.get_ig_shop_by_webhook_id(shop_ig_id)
+    if not shop:
+        return
+    owner_tg = shop["owner_telegram_id"]
+
+    # إن كان الرد الآلي مفعّلاً لهذا الزبون → هذا أول تدخّل يدوي: عطّله ونبّه صاحب المحل
+    if not db.is_auto_reply_disabled(owner_tg, customer_ig):
+        db.disable_auto_reply(owner_tg, customer_ig, hours=24)
+        enable_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔊 أعد تفعيل الرد الآلي",
+                                 callback_data=f"aron:{customer_ig}")
+        ]])
+        send_telegram_message_http(
+            abs(owner_tg),
+            "✋  لاحظت أنك ترد على زبون يدوياً.\n"
+            "أوقفتُ الرد الآلي لهذا الزبون مؤقتاً حتى لا يحدث تعارض.\n\n"
+            "أعد تفعيله عند انتهائك 👇\n"
+            "(وإلا سيعود تلقائياً بعد 24 ساعة)",
+            reply_markup=enable_kb,
+        )
+        logging.warning("[IG-ECHO] كُشف رد يدوي من المحل %s للزبون %s — عُطّل الرد الآلي",
+                        owner_tg, customer_ig)
+
+
 def _ig_event():
     """استقبال أحداث إنستغرام — تحليل رسائل DM وتسجيلها"""
     logging.warning("[IG-RAW] %s", http_req.get_data(as_text=True)[:3000])
@@ -1828,8 +1965,16 @@ def _ig_event():
         for entry in payload.get("entry", []):
             for msg_event in entry.get("messaging", []):
                 msg       = msg_event.get("message", {})
-                # تجاهل أحداث الصدى (رسائل أرسلها الحساب نفسه)
+                # رسالة صدى = رسالة أرسلها حساب المحل نفسه (رد يدوي من صاحب المحل)
                 if msg.get("is_echo"):
+                    # كشف تدخّل صاحب المحل: يعطّل الرد الآلي لهذا الزبون تلقائياً
+                    try:
+                        shop_ig_id = msg_event.get("sender", {}).get("id", "")
+                        customer_ig = msg_event.get("recipient", {}).get("id", "")
+                        if shop_ig_id and customer_ig:
+                            _handle_owner_manual_reply(shop_ig_id, customer_ig)
+                    except Exception as e:
+                        logging.error("[IG-ECHO] خطأ في كشف الرد اليدوي: %s", e)
                     continue
                 sender_id    = msg_event.get("sender",    {}).get("id", "—")
                 recipient_id = msg_event.get("recipient", {}).get("id", "—")
