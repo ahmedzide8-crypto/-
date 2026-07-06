@@ -2002,9 +2002,16 @@ def _ig_event():
         for entry in payload.get("entry", []):
             for msg_event in entry.get("messaging", []):
                 msg       = msg_event.get("message", {})
-                # رسالة صدى = رسالة أرسلها حساب المحل نفسه (رد يدوي من صاحب المحل)
+                # رسالة صدى = أي رسالة أُرسلت من حساب المحل (بوتنا نفسه، أو صاحب المحل يدوياً)
                 if msg.get("is_echo"):
-                    # كشف تدخّل صاحب المحل: يعطّل الرد الآلي لهذا الزبون تلقائياً
+                    # ميتا تُرجع app_id مع كل صدى — لو طابق تطبيقنا (IG_APP_ID) فهذا صدى
+                    # رسالة أرسلها البوت نفسه عبر الـ API → نتجاهله تماماً (مو تدخّل بشري).
+                    # لو ما طابق (أو غير موجود) → رد يدوي حقيقي من صاحب المحل عبر إنستغرام/Business Suite.
+                    echo_app_id = str(msg.get("app_id") or "")
+                    if IG_APP_ID and echo_app_id == str(IG_APP_ID):
+                        logging.info("[IG-ECHO] تجاهل صدى رسالة البوت نفسه (app_id=%s)", echo_app_id)
+                        continue
+                    # كشف تدخّل صاحب المحل الحقيقي: يعطّل الرد الآلي لهذا الزبون تلقائياً
                     try:
                         shop_ig_id = msg_event.get("sender", {}).get("id", "")
                         customer_ig = msg_event.get("recipient", {}).get("id", "")
