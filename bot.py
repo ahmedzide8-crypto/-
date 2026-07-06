@@ -1875,32 +1875,9 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
         logging.warning("[IG] طلب جديد محفوظ: order_id=%s", order_id)
         return
 
-    # كشف طلب التحدث مع إنسان
-    human_keywords = ["تحدث مع إنسان", "اتكلم مع انسان", "اريد انسان", "أريد إنسان",
-                      "مع انسان", "مع إنسان", "human", "agent", "صاحب المحل",
-                      "كلم صاحب", "اكلم صاحب"]
-    text_lower = text_stripped.lower()
-    if any(kw.lower() in text_lower for kw in human_keywords):
-        disable_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔇 أوقف الرد الآلي لهذا الزبون",
-                                 callback_data=f"aroff:{sender_id}")
-        ]])
-        send_telegram_message_http(
-            abs(shop_id),
-            f"🆘 طلب تحدث مع إنسان\n"
-            f"الزبون يريد التحدث معك مباشرة عبر إنستغرام.\n"
-            f"🆔 معرّف الزبون (IG): {sender_id}\n"
-            f"💬 الرسالة: {text_stripped}\n\n"
-            f"اضغط لإيقاف الرد الآلي لهذا الزبون (24 ساعة) والرد عليه يدوياً 👇",
-            reply_markup=disable_kb,
-        )
-        db.add_notification(shop_id, "inquiry", f"🆘 [طلب إنسان] {text_stripped}", None)
-        logging.warning("[AUTO-REPLY] الزبون %s طلب إنساناً — بانتظار قرار صاحب المحل", sender_id)
-        _send_instagram_message_raw(send_account_id, ig_token, sender_id,
-            "تم تنبيه صاحب المحل وسيتواصل معك مباشرة في أقرب وقت ممكن 🙏\n"
-            "شكراً لصبرك."
-        )
-        return
+    # ملاحظة: أُزيلت خاصية كشف "أريد التحدث مع إنسان" كمسار خاص (بقرار محمد) —
+    # أي رسالة من هذا النوع تُعامل الآن كاستفسار عام عادي بالأسفل، ولا يتعطّل
+    # الرد الآلي إلا لو ضغط صاحب المحل زر "🙋 سأرد على الزبون" بنفسه.
 
     # استفسار عام
     logging.warning("[IG-NOTIF] أحفظ إشعار لـ shop_id=%s kind=inquiry", shop_id)
@@ -1949,48 +1926,9 @@ def _ig_verify():
     return "Forbidden", 403
 
 
-def _handle_owner_manual_reply(shop_ig_id: str, customer_ig: str) -> None:
-    """
-    كُشف رد يدوي من صاحب المحل على زبون (عبر echo).
-    يعطّل الرد الآلي لهذا الزبون تلقائياً، ويُنبّه صاحب المحل مرة واحدة.
-    (ملاحظة: هذي دالة مساعدة داخلية فقط — لا تُربط بأي route.
-    الـ route الفعلي لـ POST /webhook مربوط بـ _ig_event() بالأسفل.)
-    """
-    shop = db.get_ig_shop_by_send_account_id(shop_ig_id) or db.get_ig_shop_by_webhook_id(shop_ig_id)
-    if not shop:
-        return
-    owner_tg = shop["owner_telegram_id"]
-
-    # إن كان الرد الآلي مفعّلاً لهذا الزبون → هذا أول تدخّل يدوي: عطّله ونبّه صاحب المحل
-    if not db.is_auto_reply_disabled(owner_tg, customer_ig):
-        db.disable_auto_reply(owner_tg, customer_ig, hours=24)
-
-        # صاحب المحل دخل يتحدث مباشرة — أي تدفق طلب معلّق للزبون يصير قديماً/غير مضمون.
-        # نمسحه ونطلب منه إرسال الكود مجدداً لو حبّ يطلب بعد انتهاء الاستفسار.
-        db.clear_order_flow(customer_ig)
-        try:
-            _send_ig(
-                shop["send_account_id"], shop["access_token"], customer_ig,
-                "✋  صاحب المحل يحدثك الآن مباشرة.\n"
-                "أرسل الكود مرة ثانية إذا حسيت أنك تريد تطلب السلعة بعد الحصول على الاستفسار 🔁"
-            )
-        except Exception as e:
-            logging.error("[IG-ECHO] فشل إرسال رسالة الوداع للزبون %s: %s", customer_ig, e)
-
-        enable_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔊 أعد تفعيل الرد الآلي",
-                                 callback_data=f"aron:{customer_ig}")
-        ]])
-        send_telegram_message_http(
-            abs(owner_tg),
-            "✋  لاحظت أنك ترد على زبون يدوياً.\n"
-            "أوقفتُ الرد الآلي لهذا الزبون مؤقتاً حتى لا يحدث تعارض.\n\n"
-            "أعد تفعيله عند انتهائك 👇\n"
-            "(وإلا سيعود تلقائياً بعد 24 ساعة)",
-            reply_markup=enable_kb,
-        )
-        logging.warning("[IG-ECHO] كُشف رد يدوي من المحل %s للزبون %s — عُطّل الرد الآلي",
-                        owner_tg, customer_ig)
+# ملاحظة: أُزيلت دالة كشف "الرد اليدوي عبر echo" بالكامل (بقرار محمد) — تعطيل
+# الرد الآلي يصير الآن حصراً بضغط صاحب المحل زر "🙋 سأرد على الزبون" بتلي جرام،
+# مو باكتشاف تلقائي من أحداث الصدى (وهو أصلاً غير موثوق بإنستغرام كما تبيّن).
 
 
 @_flask_app.route("/webhook", methods=["POST"])
@@ -2003,22 +1941,8 @@ def _ig_event():
             for msg_event in entry.get("messaging", []):
                 msg       = msg_event.get("message", {})
                 # رسالة صدى = أي رسالة أُرسلت من حساب المحل (بوتنا نفسه، أو صاحب المحل يدوياً)
+                # — نتجاهلها بالكامل الآن، بدون أي كشف أو تعطيل تلقائي (بقرار محمد).
                 if msg.get("is_echo"):
-                    # ميتا تُرجع app_id مع كل صدى — لو طابق تطبيقنا (IG_APP_ID) فهذا صدى
-                    # رسالة أرسلها البوت نفسه عبر الـ API → نتجاهله تماماً (مو تدخّل بشري).
-                    # لو ما طابق (أو غير موجود) → رد يدوي حقيقي من صاحب المحل عبر إنستغرام/Business Suite.
-                    echo_app_id = str(msg.get("app_id") or "")
-                    if IG_APP_ID and echo_app_id == str(IG_APP_ID):
-                        logging.info("[IG-ECHO] تجاهل صدى رسالة البوت نفسه (app_id=%s)", echo_app_id)
-                        continue
-                    # كشف تدخّل صاحب المحل الحقيقي: يعطّل الرد الآلي لهذا الزبون تلقائياً
-                    try:
-                        shop_ig_id = msg_event.get("sender", {}).get("id", "")
-                        customer_ig = msg_event.get("recipient", {}).get("id", "")
-                        if shop_ig_id and customer_ig:
-                            _handle_owner_manual_reply(shop_ig_id, customer_ig)
-                    except Exception as e:
-                        logging.error("[IG-ECHO] خطأ في كشف الرد اليدوي: %s", e)
                     continue
                 sender_id    = msg_event.get("sender",    {}).get("id", "—")
                 recipient_id = msg_event.get("recipient", {}).get("id", "—")
