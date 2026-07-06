@@ -1438,6 +1438,34 @@ def _send_ig(send_account_id, ig_token, sender_id, text):
     _send_instagram_message_raw(send_account_id, ig_token, sender_id, text)
 
 
+def _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped) -> None:
+    """
+    يُستدعى لما الزبون يرسل رسالة لا تطابق المتوقع بمنتصف تدفق الطلب (لون/قياس/كمية/بيانات/تأكيد).
+    يُعامَل كاستفسار: يبلّغ صاحب المحل + يطمّن الزبون — بدون مسح حالة الطلب (order_flow)
+    وبدون أي أزرار قبول/رفض (تلك حصراً لبطاقة الطلب الحقيقية عند التأكيد).
+    """
+    db.add_notification(shop_id, "inquiry", f"[أثناء تدفق طلب] {text_stripped}", None)
+    reply_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🙋 سأرد على الزبون", callback_data=f"aroff:{sender_id}")
+    ]])
+    send_telegram_message_http(
+        abs(shop_id),
+        f"❓  استفسار من زبون  (أثناء إتمام طلب)\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"💬  {text_stripped}\n"
+        f"🆔  {sender_id}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"طلبه الحالي محفوظ ولن يضيع.\n"
+        f"اضغط لترد بنفسك (يوقف الرد الآلي لهذا الزبون) 👇",
+        reply_markup=reply_kb,
+    )
+    _send_ig(send_account_id, ig_token, sender_id,
+        "شكراً لتواصلك معنا 🙏\n"
+        "سؤالك وصل لصاحب المحل وسيرد عليك قريباً.\n\n"
+        "طلبك الحالي محفوظ — أكمله متى ما حبيت بإرسال الجواب المطلوب."
+    )
+
+
 def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
                         product, code, text_stripped) -> bool:
     """
@@ -1496,9 +1524,7 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
         colors = db.get_available_colors(fcode)
         chosen = next((c for c in colors if c.lower() == text_stripped.lower()), None)
         if chosen is None:
-            _send_ig(send_account_id, ig_token, sender_id,
-                     "❌ هذا اللون غير متوفر. اكتب أحد الألوان المعروضة:\n" +
-                     "\n".join(f"  • {c}" for c in colors))
+            _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped)
             return True
         sizes = db.get_available_sizes_for_color(fcode, chosen)
         lines = [f"🎨 اللون: {chosen}", "", "📐 القياسات المتوفرة بهذا اللون:"]
@@ -1515,9 +1541,7 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
         sizes = db.get_available_sizes_for_color(fcode, fcolor)
         chosen = next((s for s in sizes if s["size"].lower() == text_stripped.lower()), None)
         if chosen is None:
-            _send_ig(send_account_id, ig_token, sender_id,
-                     "❌ هذا القياس غير متوفر. اكتب أحد القياسات المعروضة:\n" +
-                     "\n".join(f"  • {s['size']}" for s in sizes))
+            _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped)
             return True
         avail = chosen["quantity"]
         _send_ig(send_account_id, ig_token, sender_id,
@@ -1534,8 +1558,8 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
         try:
             qty = int(text_stripped)
         except ValueError:
-            _send_ig(send_account_id, ig_token, sender_id,
-                     "❌ اكتب رقماً صحيحاً للكمية 👇")
+            # مو رقم إطلاقاً — الأغلب سؤال/استفسار، مو محاولة إجابة
+            _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped)
             return True
         if qty <= 0:
             _send_ig(send_account_id, ig_token, sender_id, "❌ الكمية يجب أن تكون 1 أو أكثر 👇")
@@ -1570,8 +1594,7 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
     # ── خطوة: ننتظر بيانات التوصيل ──
     if step == "await_details":
         if not _RE_PHONE.search(text_stripped):
-            _send_ig(send_account_id, ig_token, sender_id,
-                     "❌ لم أجد رقم هاتف صحيح. أرسل:\nالاسم / رقم الهاتف / العنوان")
+            _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped)
             return True
         name, phone, address = _parse_order(text_stripped)
         fcode  = flow["code"]
@@ -1619,8 +1642,7 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
                      "تم إلغاء الطلب 🙏 لو حبيت تطلب مرة ثانية، أرسل كود السلعة.")
             return True
         if not is_confirm:
-            _send_ig(send_account_id, ig_token, sender_id,
-                     "لتأكيد الطلب اكتب:  تأكيد\nلإلغائه اكتب:  لا")
+            _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped)
             return True
 
         # تأكيد → سجّل الطلب فعلياً
@@ -1942,6 +1964,19 @@ def _handle_owner_manual_reply(shop_ig_id: str, customer_ig: str) -> None:
     # إن كان الرد الآلي مفعّلاً لهذا الزبون → هذا أول تدخّل يدوي: عطّله ونبّه صاحب المحل
     if not db.is_auto_reply_disabled(owner_tg, customer_ig):
         db.disable_auto_reply(owner_tg, customer_ig, hours=24)
+
+        # صاحب المحل دخل يتحدث مباشرة — أي تدفق طلب معلّق للزبون يصير قديماً/غير مضمون.
+        # نمسحه ونطلب منه إرسال الكود مجدداً لو حبّ يطلب بعد انتهاء الاستفسار.
+        db.clear_order_flow(customer_ig)
+        try:
+            _send_ig(
+                shop["send_account_id"], shop["access_token"], customer_ig,
+                "✋  صاحب المحل يحدثك الآن مباشرة.\n"
+                "أرسل الكود مرة ثانية إذا حسيت أنك تريد تطلب السلعة بعد الحصول على الاستفسار 🔁"
+            )
+        except Exception as e:
+            logging.error("[IG-ECHO] فشل إرسال رسالة الوداع للزبون %s: %s", customer_ig, e)
+
         enable_kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔊 أعد تفعيل الرد الآلي",
                                  callback_data=f"aron:{customer_ig}")
