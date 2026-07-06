@@ -1927,11 +1927,12 @@ def _ig_verify():
     return "Forbidden", 403
 
 
-@_flask_app.route("/webhook", methods=["POST"])
 def _handle_owner_manual_reply(shop_ig_id: str, customer_ig: str) -> None:
     """
     كُشف رد يدوي من صاحب المحل على زبون (عبر echo).
     يعطّل الرد الآلي لهذا الزبون تلقائياً، ويُنبّه صاحب المحل مرة واحدة.
+    (ملاحظة: هذي دالة مساعدة داخلية فقط — لا تُربط بأي route.
+    الـ route الفعلي لـ POST /webhook مربوط بـ _ig_event() بالأسفل.)
     """
     shop = db.get_ig_shop_by_send_account_id(shop_ig_id) or db.get_ig_shop_by_webhook_id(shop_ig_id)
     if not shop:
@@ -1957,6 +1958,7 @@ def _handle_owner_manual_reply(shop_ig_id: str, customer_ig: str) -> None:
                         owner_tg, customer_ig)
 
 
+@_flask_app.route("/webhook", methods=["POST"])
 def _ig_event():
     """استقبال أحداث إنستغرام — تحليل رسائل DM وتسجيلها"""
     logging.warning("[IG-RAW] %s", http_req.get_data(as_text=True)[:3000])
