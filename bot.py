@@ -2284,4 +2284,5 @@ def _run_web_server() -> None:
 threading.Thread(target=_run_web_server, daemon=True).start()
 
 print("Bot is running...")
+logging.warning("[VERSION] ✅ نسخة v2-handoff-fixed محمّلة — كشف الرد اليدوي يعمل")
 app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
