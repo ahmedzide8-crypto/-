@@ -160,6 +160,44 @@ def init_db() -> None:
                 disabled_until INTEGER NOT NULL,
                 PRIMARY KEY (shop_id, customer_ig_id)
             );
+
+            -- نظام التنسيقات: تجميعة قطع (كل قطعة = منتج عادي بجدول products)
+            CREATE TABLE IF NOT EXISTS outfits (
+                outfit_code TEXT    PRIMARY KEY,
+                shop_id     INTEGER NOT NULL,
+                created_at  INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS outfit_items (
+                outfit_code  TEXT    NOT NULL,
+                item_order   INTEGER NOT NULL,
+                product_code TEXT    NOT NULL,
+                PRIMARY KEY (outfit_code, item_order)
+            );
+
+            -- ربط mid رسالة إنستغرام المُرسَلة بكود القطعة — يُستخدم لكشف
+            -- "الرد" (reply_to) من الزبون على رسالة قطعة معيّنة من التنسيقة.
+            CREATE TABLE IF NOT EXISTS sent_item_messages (
+                mid          TEXT    PRIMARY KEY,
+                product_code TEXT    NOT NULL,
+                customer_ig  TEXT    NOT NULL,
+                shop_id      INTEGER NOT NULL,
+                sent_at      INTEGER NOT NULL
+            );
+
+            -- جلسة "أريد التنسيقة كلها" — تتبّع تسلسل لون/قياس/كمية لكل قطعة
+            -- من التنسيقة بالتتابع (قرار وحدة كل مرة)، ثم بيانات مشتركة وتأكيد واحد.
+            CREATE TABLE IF NOT EXISTS outfit_order_session (
+                customer_ig   TEXT    PRIMARY KEY,
+                shop_id       INTEGER NOT NULL,
+                outfit_code   TEXT    NOT NULL,
+                pending_codes TEXT    NOT NULL,
+                collected     TEXT    NOT NULL,
+                step          TEXT    NOT NULL DEFAULT 'await_color',
+                cur_color     TEXT    DEFAULT '',
+                cur_size      TEXT    DEFAULT '',
+                updated_at    INTEGER NOT NULL
+            );
         """)
 
         # أضف الأعمدة الجديدة آمناً على قواعد بيانات قائمة
@@ -606,7 +644,7 @@ def pop_expired_handoffs() -> list:
 # توليد كود السلعة
 # ────────────────────────────────────────────────────────────
 def generate_unique_code() -> str:
-    """ولّد كوداً فريداً عبر كل المنصّة (يتحقق من products و retired_codes)"""
+    """ولّد كوداً فريداً عبر كل المنصّة (يتحقق من products و outfits و retired_codes)"""
     with _conn() as con:
         while True:
             prefix = "".join(random.choices(string.ascii_uppercase, k=2))
@@ -614,8 +652,9 @@ def generate_unique_code() -> str:
             code = f"{prefix}-{suffix}"
             exists = con.execute(
                 "SELECT 1 FROM products WHERE code = ? "
+                "UNION SELECT 1 FROM outfits WHERE outfit_code = ? "
                 "UNION SELECT 1 FROM retired_codes WHERE code = ?",
-                (code, code)
+                (code, code, code)
             ).fetchone()
             if not exists:
                 return code
@@ -1122,3 +1161,118 @@ def seed_ig_shops_from_env() -> None:
             "[IG-SEED] No shops seeded — set IG_SHOP_ACCOUNT_ID, "
             "IG_ACCESS_TOKEN, IG_SHOP_OWNER_TELEGRAM_ID in Railway"
         )
+
+
+# ────────────────────────────────────────────────────────────
+# نظام التنسيقات (Outfits)
+# ────────────────────────────────────────────────────────────
+
+def add_outfit(outfit_code: str, shop_id: int) -> None:
+    """سجّل كود تنسيقة جديدة."""
+    import time as _t
+    with _conn() as con:
+        con.execute(
+            "INSERT INTO outfits (outfit_code, shop_id, created_at) VALUES (?, ?, ?)",
+            (outfit_code, shop_id, int(_t.time()))
+        )
+
+
+def add_outfit_item(outfit_code: str, item_order: int, product_code: str) -> None:
+    """أضف قطعة لتسلسل التنسيقة."""
+    with _conn() as con:
+        con.execute(
+            "INSERT INTO outfit_items (outfit_code, item_order, product_code) VALUES (?, ?, ?)",
+            (outfit_code, item_order, product_code)
+        )
+
+
+def get_outfit(outfit_code: str) -> Optional[dict]:
+    """أرجع بيانات التنسيقة (shop_id) أو None."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM outfits WHERE outfit_code = ?", (outfit_code,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_outfit_items(outfit_code: str) -> list:
+    """أرجع قطع التنسيقة بالترتيب، مع اسم وسعر كل قطعة من جدول products."""
+    with _conn() as con:
+        rows = con.execute("""
+            SELECT oi.item_order, oi.product_code, p.name, p.price
+            FROM outfit_items oi
+            JOIN products p ON p.code = oi.product_code
+            WHERE oi.outfit_code = ?
+            ORDER BY oi.item_order ASC
+        """, (outfit_code,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def save_sent_item_message(mid: str, product_code: str, customer_ig: str, shop_id: int) -> None:
+    """احفظ ربط mid رسالة قطعة مُرسَلة → كود القطعة (لكشف الرد/reply_to لاحقاً)."""
+    import time as _t
+    with _conn() as con:
+        con.execute("""
+            INSERT OR REPLACE INTO sent_item_messages
+                (mid, product_code, customer_ig, shop_id, sent_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (mid, product_code, customer_ig, shop_id, int(_t.time())))
+
+
+def get_item_by_mid(mid: str) -> Optional[dict]:
+    """أرجع بيانات القطعة المرتبطة بـ mid معيّن (لكشف رد الزبون على رسالة قطعة)."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM sent_item_messages WHERE mid = ?", (mid,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+# ── جلسة "أريد التنسيقة كلها" (طلب كل القطع بالتتابع) ──
+
+def start_outfit_session(customer_ig: str, shop_id: int, outfit_code: str,
+                          pending_codes: list, step: str = "idle") -> None:
+    import time as _t
+    with _conn() as con:
+        con.execute("""
+            INSERT OR REPLACE INTO outfit_order_session
+                (customer_ig, shop_id, outfit_code, pending_codes, collected,
+                 step, cur_color, updated_at)
+            VALUES (?, ?, ?, ?, '[]', ?, '', ?)
+        """, (customer_ig, shop_id, outfit_code, json.dumps(pending_codes), step, int(_t.time())))
+
+
+def get_outfit_session(customer_ig: str) -> Optional[dict]:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM outfit_order_session WHERE customer_ig = ?", (customer_ig,)
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["pending_codes"] = json.loads(d["pending_codes"])
+        d["collected"]     = json.loads(d["collected"])
+        return d
+
+
+def update_outfit_session(customer_ig: str, **fields) -> None:
+    import time as _t
+    if not fields:
+        return
+    if "pending_codes" in fields:
+        fields["pending_codes"] = json.dumps(fields["pending_codes"])
+    if "collected" in fields:
+        fields["collected"] = json.dumps(fields["collected"])
+    fields["updated_at"] = int(_t.time())
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [customer_ig]
+    with _conn() as con:
+        con.execute(
+            f"UPDATE outfit_order_session SET {set_clause} WHERE customer_ig = ?",
+            values
+        )
+
+
+def clear_outfit_session(customer_ig: str) -> None:
+    with _conn() as con:
+        con.execute("DELETE FROM outfit_order_session WHERE customer_ig = ?", (customer_ig,))
