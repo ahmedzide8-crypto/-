@@ -60,7 +60,8 @@ else:
 
 # ── حالات المحادثة ───────────────────────────────────────────
 (ASK_NAME, ASK_PRICE, ASK_HAS_SIZES, ASK_SIZES, ASK_HAS_COLORS, ASK_COLOR_NAME,
- ASK_COLOR_QTYS, ASK_MORE_COLORS, ASK_SIMPLE_QTY, CONFIRM_ADD, ASK_DEL_CODE) = range(11)
+ ASK_COLOR_QTYS, ASK_MORE_COLORS, ASK_SIMPLE_QTY, CONFIRM_ADD, ASK_DEL_CODE,
+ ASK_OUTFIT_MORE) = range(12)
 
 # ── تسميات المدد للعرض ───────────────────────────────────────
 PLAN_LABELS = {
@@ -75,7 +76,9 @@ TEST_CUSTOMER = "customer"  # /testcustomer — يحاكي الزبون
 
 # ── أنماط رسائل الزبون ──────────────────────────────────────
 _RE_GREETING = re.compile(
-    r"^(سلام|مرحبا|مرحباً|هاي|أهلا|أهلاً|hello|hi)\b", re.IGNORECASE
+    r"^(السلام عليكم|سلام عليكم|سلام|مرحبا|مرحباً|هلو|هلا|هاي|أهلا|أهلاً|اهلا|اهلاً|"
+    r"شلونك|شلونكم|كيف الحال|كيفك|شخبارك|موجودين|موجود|hello|hi|hey)\b",
+    re.IGNORECASE
 )
 _RE_PRODUCT  = re.compile(r"\b([A-Z]{2}-[A-Z0-9]{4})\b")
 _RE_PHONE    = re.compile(r"07[3-9]\d{8}|\+9647[3-9]\d{8}")
@@ -86,7 +89,7 @@ ADMIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 OWNER_KB = ReplyKeyboardMarkup(
-    [["➕ إضافة سلعة"], ["📋 عرض السلع", "🗑 حذف سلعة"],
+    [["➕ إضافة سلعة", "🎽 التنسيقات"], ["📋 عرض السلع", "🗑 حذف سلعة"],
      ["🔔 الإشعارات", "🔗 ربط إنستغرام"]],
     resize_keyboard=True,
 )
@@ -643,7 +646,24 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not can_manage(uid):
         await _deny_pending(update, context)
         return ConversationHandler.END
+    context.user_data["is_outfit"] = False
     await update.message.reply_text("اسم السلعة:", reply_markup=ReplyKeyboardRemove())
+    return ASK_NAME
+
+
+async def outfit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بدء تدفق التنسيقات — يستخدم نفس أسئلة إضافة سلعة عادية لكل قطعة."""
+    uid = _eff_uid(update, context)
+    if not can_manage(uid):
+        await _deny_pending(update, context)
+        return ConversationHandler.END
+    context.user_data["is_outfit"] = True
+    context.user_data["outfit_items"] = []
+    await update.message.reply_text(
+        "🎽  إضافة تنسيقة جديدة\n"
+        "أضف القطعة الأولى — اسم السلعة:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return ASK_NAME
 
 
@@ -859,10 +879,19 @@ async def _show_add_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CONFIRM_ADD
 
 
+def _reset_item_fields(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """نظّف حقول القطعة الحالية (اسم/سعر/قياسات/متغيّرات/لون حالي) قبل بدء
+    قطعة جديدة بمنتصف تدفق التنسيقة — بدون ما يلمس is_outfit/outfit_items."""
+    for key in ("name", "price", "sizes", "variants", "current_color", "product_type"):
+        context.user_data.pop(key, None)
+
+
 async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "نعم" not in update.message.text.strip():
         await update.message.reply_text("❌ تم الإلغاء.", reply_markup=OWNER_KB)
         _clear_conv(context)
+        context.user_data.pop("is_outfit", None)
+        context.user_data.pop("outfit_items", None)
         return ConversationHandler.END
     uid  = _eff_uid(update, context)
     code = db.generate_unique_code()
@@ -875,11 +904,73 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # احفظ متغيّرات (لون+قياس+كمية)
     for v in context.user_data.get("variants", []):
         db.add_variant(code, v["color"], v["quantity"], v["size"])
-    _clear_conv(context)
-    await update.message.reply_text(
-        f"تمت الإضافة ✅ — ضع هذا الكود في آخر كابشن منشور السلعة على إنستغرام: {code}",
-        reply_markup=OWNER_KB,
+
+    if not context.user_data.get("is_outfit"):
+        _clear_conv(context)
+        await update.message.reply_text(
+            f"تمت الإضافة ✅ — ضع هذا الكود في آخر كابشن منشور السلعة على إنستغرام: {code}",
+            reply_markup=OWNER_KB,
+        )
+        return ConversationHandler.END
+
+    # ── وضع التنسيقة: سجّل هذي القطعة بالتسلسل واستمر للي بعدها ──
+    outfit_items = context.user_data.setdefault("outfit_items", [])
+    outfit_items.append({
+        "code": code,
+        "name": context.user_data["name"],
+        "price": context.user_data["price"],
+    })
+    piece_num = len(outfit_items)
+    _reset_item_fields(context)
+
+    if piece_num == 1:
+        await update.message.reply_text(
+            f"✅ تمت إضافة القطعة الأولى (كود: {code})\n\n"
+            "أضف القطعة الثانية — اسم السلعة:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ASK_NAME
+
+    yn_kb = ReplyKeyboardMarkup(
+        [["نعم", "لا"]], resize_keyboard=True, one_time_keyboard=True
     )
+    await update.message.reply_text(
+        f"✅ تمت إضافة القطعة رقم {piece_num} (كود: {code})\n\n"
+        "🎽 هل تريد إضافة قطعة أخرى للتنسيقة؟",
+        reply_markup=yn_kb,
+    )
+    return ASK_OUTFIT_MORE
+
+
+async def got_outfit_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ans = update.message.text.strip()
+    outfit_items = context.user_data.get("outfit_items", [])
+    if "نعم" in ans:
+        await update.message.reply_text(
+            f"أضف القطعة رقم {len(outfit_items) + 1} — اسم السلعة:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ASK_NAME
+
+    # انتهى — ولّد كود التنسيقة الموحّد واحفظ تسلسل القطع
+    uid = _eff_uid(update, context)
+    outfit_code = db.generate_unique_code()
+    db.add_outfit(outfit_code, uid)
+    for i, item in enumerate(outfit_items, start=1):
+        db.add_outfit_item(outfit_code, i, item["code"])
+
+    lines = ["🎽  تمّت إضافة التنسيقة ✅", "━━━━━━━━━━━━━━",
+             f"الكود الموحّد للتنسيقة:  {outfit_code}", "━━━━━━━━━━━━━━",
+             "القطع:"]
+    for i, item in enumerate(outfit_items, start=1):
+        lines.append(f"  {i}. {item['name']} — {item['price']}  (كود: {item['code']})")
+    lines.append("━━━━━━━━━━━━━━")
+    lines.append(f"ضع الكود الموحّد ({outfit_code}) بآخر كابشن منشور التنسيقة على إنستغرام.")
+    await update.message.reply_text("\n".join(lines), reply_markup=OWNER_KB)
+
+    context.user_data.pop("is_outfit", None)
+    context.user_data.pop("outfit_items", None)
+    _clear_conv(context)
     return ConversationHandler.END
 
 
@@ -1309,7 +1400,10 @@ persistence = PicklePersistence(filepath="bot_persistence")
 app = ApplicationBuilder().token(TOKEN).persistence(persistence).post_init(_post_init).build()
 
 add_conv = ConversationHandler(
-    entry_points=[MessageHandler(filters.Regex(r"^➕ إضافة سلعة$"), add_start)],
+    entry_points=[
+        MessageHandler(filters.Regex(r"^➕ إضافة سلعة$"), add_start),
+        MessageHandler(filters.Regex(r"^🎽 التنسيقات$"), outfit_start),
+    ],
     states={
         ASK_NAME:        [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
         ASK_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, got_price)],
@@ -1321,6 +1415,7 @@ add_conv = ConversationHandler(
         ASK_MORE_COLORS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_more_colors)],
         ASK_SIMPLE_QTY:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_simple_qty)],
         CONFIRM_ADD:     [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_save)],
+        ASK_OUTFIT_MORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_outfit_more)],
     },
     fallbacks=[CommandHandler("cancel", cancel)],
 )
@@ -1392,6 +1487,34 @@ def _send_instagram_message_raw(
     except Exception as e:
         logging.error("[IG-SEND] ❌ استثناء: %s", e)
         return False
+
+
+def _send_instagram_message_get_mid(
+    send_account_id: str, access_token: str, recipient_id: str, text: str
+):
+    """
+    نفس إرسال رسالة إنستغرام العادي، لكن يرجّع mid الرسالة (أو None عند الفشل).
+    نحتاج mid لربط رسالة قطعة من التنسيقة بكودها (لكشف reply_to لاحقاً).
+    """
+    url = f"https://graph.instagram.com/v25.0/{send_account_id}/messages"
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message":   {"text": text},
+        "access_token": access_token,
+    }
+    try:
+        r = requests.post(url, json=payload, headers={"Content-Type": "application/json"},
+                          timeout=10)
+        if r.status_code == 200:
+            data = r.json() if r.content else {}
+            mid = data.get("message_id") or data.get("id")
+            logging.warning("[IG-SEND] ✅ رسالة أُرسلت إلى %s (mid=%s)", recipient_id, mid)
+            return mid
+        logging.error("[IG-SEND] ❌ فشل (%s): %s", r.status_code, r.text[:300])
+        return None
+    except Exception as e:
+        logging.error("[IG-SEND] ❌ استثناء: %s", e)
+        return None
 
 
 def send_telegram_message_http(chat_id: int, text: str, reply_markup=None) -> bool:
@@ -1466,6 +1589,254 @@ def _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_s
     )
 
 
+def _send_outfit_items(send_account_id, ig_token, sender_id, shop_id, outfit_code) -> None:
+    """يرسل كل قطعة من التنسيقة برسالة منفصلة (لتفعيل خاصية 'الرد' Reply
+    عليها لطلبها مباشرة)، ويحفظ ربط mid كل رسالة بكود قطعتها."""
+    items = db.get_outfit_items(outfit_code)
+    if not items:
+        _send_ig(send_account_id, ig_token, sender_id, "عذراً، ما لقيت تفاصيل هذي التنسيقة.")
+        return
+    _send_ig(send_account_id, ig_token, sender_id,
+        "🎽  هذي تفاصيل التنسيقة:\n"
+        "رد (Reply) على رسالة القطعة اللي تعجبك لطلبها مباشرة.\n"
+        "أو اكتب:  أريد التنسيقة كلها  — لطلب كل القطع.")
+    for item in items:
+        text = (f"{item['item_order']}. 📦 {item['name']}\n"
+                f"💰 السعر: {item['price']}\n"
+                f"كود: {item['product_code']}")
+        mid = _send_instagram_message_get_mid(send_account_id, ig_token, sender_id, text)
+        if mid:
+            db.save_sent_item_message(mid, item["product_code"], sender_id, shop_id)
+    # نجهّز جلسة التنسيقة (idle) لو حبّ الزبون يطلبها كلها لاحقاً بكتابة العبارة
+    codes = [it["product_code"] for it in items]
+    db.start_outfit_session(sender_id, shop_id, outfit_code, codes, step="idle")
+
+
+_OUTFIT_BULK_PHRASES = (
+    "أريد التنسيقة كلها", "اريد التنسيقة كلها", "أريدها كلها", "اريدها كلها",
+    "أريد التنسيقه كلها", "اريد التنسيقه كلها", "أريد كل التنسيقة", "اريد كل التنسيقة",
+)
+
+
+def _outfit_bulk_start_item(sender_id, send_account_id, ig_token, code) -> None:
+    """يبدأ سؤال قطعة معيّنة من التنسيقة (لون إذا موجود، وإلا قياس، وإلا كمية مباشرة)."""
+    product = db.get_product(code)
+    if product is None:
+        return
+    colors = db.get_available_colors(code)
+    if colors:
+        db.update_outfit_session(sender_id, step="await_color", cur_color="", cur_size="")
+        _send_ig(send_account_id, ig_token, sender_id,
+            f"📦 {product['name']}  💰 {product['price']}\n\n"
+            "🎨 الألوان المتوفرة:\n" + "\n".join(f"  • {c}" for c in colors) +
+            "\nاكتب اسم اللون الذي تريده 👇")
+        return
+    sizes = db.get_available_sizes_for_color(code, "")
+    if len(sizes) == 1 and sizes[0]["size"] == "":
+        db.update_outfit_session(sender_id, step="await_qty", cur_color="", cur_size="")
+        avail = sizes[0]["quantity"]
+        _send_ig(send_account_id, ig_token, sender_id,
+            f"📦 {product['name']}  💰 {product['price']}\n"
+            f"الحالة: {_stock_phrase(avail)}\n\nكم الكمية التي تريدها؟ اكتب رقماً 👇")
+        return
+    db.update_outfit_session(sender_id, step="await_size", cur_color="", cur_size="")
+    _send_ig(send_account_id, ig_token, sender_id,
+        f"📦 {product['name']}  💰 {product['price']}\n\n"
+        "📐 القياسات المتوفرة:\n" + "\n".join(f"  • {s['size']}" for s in sizes) +
+        "\nاكتب القياس الذي تريده 👇")
+
+
+def _outfit_bulk_finish_and_go_details(sender_id, send_account_id, ig_token) -> None:
+    db.update_outfit_session(sender_id, step="await_details")
+    _send_ig(send_account_id, ig_token, sender_id,
+        "✅ تمام، خلّصنا كل قطع التنسيقة.\n\n"
+        "لإتمام الطلب أرسل بهذا الشكل:\nالاسم / رقم الهاتف / العنوان")
+
+
+def _start_outfit_bulk_order(send_account_id, ig_token, sender_id, shop_id) -> bool:
+    """يُستدعى لما الزبون يكتب 'أريد التنسيقة كلها' — يفعّل جلسة الطلب الشامل
+    لو عنده تنسيقة معروضة سابقاً (idle)."""
+    session = db.get_outfit_session(sender_id)
+    if session is None or not session["pending_codes"]:
+        return False
+    db.update_outfit_session(sender_id, step="await_color", cur_color="", cur_size="")
+    _outfit_bulk_start_item(sender_id, send_account_id, ig_token, session["pending_codes"][0])
+    return True
+
+
+def _process_outfit_bulk_flow(sender_id, send_account_id, ig_token, shop_id, text_stripped) -> bool:
+    """
+    يدير جلسة 'أريد التنسيقة كلها' — يسأل لون/قياس/كمية لكل قطعة بالتتابع
+    (قرار وحدة كل مرة لتقليل إرهاق القرار)، ثم بيانات توصيل مشتركة وتأكيد
+    واحد يغطي كل القطع، وأخيراً طلب مستقل لكل قطعة بزر قبول/رفض خاص بها
+    (نفس آلية acc:/rej: الحالية دون أي تعديل بالكولباك — يحافظ على الخصم الذري).
+    """
+    session = db.get_outfit_session(sender_id)
+    if session is None or session["step"] == "idle":
+        return False
+
+    step      = session["step"]
+    pending   = session["pending_codes"]
+    collected = session["collected"]
+
+    if step == "await_details":
+        if not _RE_PHONE.search(text_stripped):
+            _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped)
+            return True
+        name, phone, address = _parse_order(text_stripped)
+        db.update_outfit_session(sender_id, step="await_confirm")
+        db.set_order_customer(sender_id, name, phone, address)
+        lines = ["📝  مراجعة طلب التنسيقة:", "━━━━━━━━━━"]
+        for it in collected:
+            parts = [f"📦 {it['name']}"]
+            if it.get("color"): parts.append(f"🎨 {it['color']}")
+            if it.get("size"):  parts.append(f"📐 {it['size']}")
+            parts.append(f"🔢 {it['qty']}")
+            lines.append("  |  ".join(parts))
+        lines += ["━━━━━━━━━━", f"👤 {name or '—'}", f"📞 {phone or '—'}", f"📍 {address or '—'}",
+                  "━━━━━━━━━━", "لتأكيد الطلب اكتب:  تأكيد", "لإلغائه اكتب:  لا"]
+        _send_ig(send_account_id, ig_token, sender_id, "\n".join(lines))
+        return True
+
+    if step == "await_confirm":
+        ans = text_stripped.lower()
+        confirm_words = ["تأكيد", "نعم", "اي", "أي", "ايي", "تاكيد", "اوك", "ok", "yes", "أكد", "اكد"]
+        cancel_words  = ["لا", "الغاء", "إلغاء", "الغي", "لأ", "no", "cancel"]
+        is_confirm = any(w in ans for w in confirm_words)
+        is_cancel  = any(w == ans or w in ans for w in cancel_words)
+        if is_cancel and not is_confirm:
+            db.clear_outfit_session(sender_id)
+            _send_ig(send_account_id, ig_token, sender_id, "تم إلغاء طلب التنسيقة 🙏")
+            return True
+        if not is_confirm:
+            _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped)
+            return True
+
+        cust = db.get_order_customer(sender_id) or {}
+        name    = cust.get("name", "")
+        phone   = cust.get("phone", "")
+        address = cust.get("address", "")
+
+        order_pairs = []
+        summary_lines = ["🎽  طلب تنسيقة جديد", "━━━━━━━━━━━━━━"]
+        for it in collected:
+            order_id = db.add_order(
+                shop_id, it["code"], name, phone, address, None,
+                color=it.get("color", ""), size=it.get("size", ""),
+                qty=it["qty"], ig_sender_id=str(sender_id)
+            )
+            order_pairs.append((order_id, it))
+            color_line = f"\n  🎨 {it['color']}" if it.get("color") else ""
+            size_line  = f"\n  📐 {it['size']}"  if it.get("size")  else ""
+            summary_lines.append(
+                f"📦 {it['name']} ({it['code']}){color_line}{size_line}\n"
+                f"  🔢 الكمية: {it['qty']}   💰 {it['price']}"
+            )
+        summary_lines += ["━━━━━━━━━━━━━━", f"👤  {name or '—'}", f"📞  {phone or '—'}",
+                           f"📍  {address or '—'}", "━━━━━━━━━━━━━━",
+                           "اضغط قبول أو رفض لكل قطعة  👇"]
+        kb_rows = [
+            [InlineKeyboardButton(f"✅ قبول {it['name'][:12]}", callback_data=f"acc:{order_id}"),
+             InlineKeyboardButton(f"❌ رفض {it['name'][:12]}",  callback_data=f"rej:{order_id}")]
+            for order_id, it in order_pairs
+        ]
+        send_telegram_message_http(
+            abs(shop_id), "\n\n".join(summary_lines),
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+        )
+        _send_ig(send_account_id, ig_token, sender_id,
+                 "تم استلام طلب التنسيقة كامل ✅ سيتواصل معك المحل قريباً بعد المراجعة.")
+        db.clear_outfit_session(sender_id)
+        return True
+
+    # ── خطوات القطعة الحالية (لون/قياس/كمية) ──
+    if not pending:
+        db.clear_outfit_session(sender_id)
+        return False
+    cur_code = pending[0]
+    product = db.get_product(cur_code)
+    if product is None:
+        pending.pop(0)
+        db.update_outfit_session(sender_id, pending_codes=pending)
+        if pending:
+            _outfit_bulk_start_item(sender_id, send_account_id, ig_token, pending[0])
+        else:
+            _outfit_bulk_finish_and_go_details(sender_id, send_account_id, ig_token)
+        return True
+
+    if step == "await_color":
+        colors = db.get_available_colors(cur_code)
+        chosen = next((c for c in colors if c.lower() == text_stripped.lower()), None)
+        if chosen is None:
+            _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped)
+            return True
+        sizes = db.get_available_sizes_for_color(cur_code, chosen)
+        if len(sizes) == 1 and sizes[0]["size"] == "":
+            avail = sizes[0]["quantity"]
+            db.update_outfit_session(sender_id, cur_color=chosen, cur_size="", step="await_qty")
+            _send_ig(send_account_id, ig_token, sender_id,
+                f"🎨 اللون: {chosen}\nالحالة: {_stock_phrase(avail)}\n\n"
+                "كم الكمية التي تريدها؟ اكتب رقماً 👇")
+            return True
+        db.update_outfit_session(sender_id, cur_color=chosen, step="await_size")
+        _send_ig(send_account_id, ig_token, sender_id,
+            f"🎨 اللون: {chosen}\n\n📐 القياسات المتوفرة بهذا اللون:\n" +
+            "\n".join(f"  • {s['size']}" for s in sizes) +
+            "\nاكتب القياس الذي تريده 👇")
+        return True
+
+    if step == "await_size":
+        cur_color = session.get("cur_color") or ""
+        sizes = db.get_available_sizes_for_color(cur_code, cur_color)
+        chosen = next((s for s in sizes if s["size"].lower() == text_stripped.lower()), None)
+        if chosen is None:
+            _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped)
+            return True
+        avail = chosen["quantity"]
+        db.update_outfit_session(sender_id, cur_size=chosen["size"], step="await_qty")
+        _send_ig(send_account_id, ig_token, sender_id,
+            f"📐 القياس: {chosen['size']}\nالحالة: {_stock_phrase(avail)}\n\n"
+            "كم الكمية التي تريدها؟ اكتب رقماً 👇")
+        return True
+
+    if step == "await_qty":
+        cur_color = session.get("cur_color") or ""
+        cur_size  = session.get("cur_size") or ""
+        try:
+            qty = int(text_stripped)
+        except ValueError:
+            _send_ig(send_account_id, ig_token, sender_id, "❌ اكتب رقماً صحيحاً للكمية 👇")
+            return True
+        if qty <= 0:
+            _send_ig(send_account_id, ig_token, sender_id, "❌ الكمية يجب أن تكون 1 أو أكثر 👇")
+            return True
+        var = db.get_variant(cur_code, cur_color, cur_size)
+        if var is None or var["quantity"] < qty:
+            avail = var["quantity"] if var else 0
+            if avail <= 0:
+                _send_ig(send_account_id, ig_token, sender_id,
+                         "عذراً 🙏 نفد هذا المقاس. جرّب مقاساً أو لوناً آخر، أو اكتب 0 للتخطي.")
+            else:
+                _send_ig(send_account_id, ig_token, sender_id,
+                         "عذراً 🙏 الكمية المطلوبة غير متوفرة حالياً.\nاكتب كمية أقل 👇")
+            return True
+        # القطعة الحالية خلصت — سجّلها بقائمة collected وانتقل للي بعدها
+        collected.append({
+            "code": cur_code, "name": product["name"], "price": product["price"],
+            "color": cur_color, "size": cur_size, "qty": qty,
+        })
+        pending.pop(0)
+        db.update_outfit_session(sender_id, pending_codes=pending, collected=collected)
+        if pending:
+            _outfit_bulk_start_item(sender_id, send_account_id, ig_token, pending[0])
+        else:
+            _outfit_bulk_finish_and_go_details(sender_id, send_account_id, ig_token)
+        return True
+
+    return False
+
+
+
 def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
                         product, code, text_stripped) -> bool:
     """
@@ -1527,6 +1898,15 @@ def _process_order_flow(sender_id, send_account_id, ig_token, shop_id,
             _handle_inflow_inquiry(send_account_id, ig_token, sender_id, shop_id, text_stripped)
             return True
         sizes = db.get_available_sizes_for_color(fcode, chosen)
+        # لون بلا قياسات حقيقية (قياس فارغ واحد فقط) → تخطّى سؤال القياس، اذهب للكمية مباشرة
+        if len(sizes) == 1 and sizes[0]["size"] == "":
+            avail = sizes[0]["quantity"]
+            _send_ig(send_account_id, ig_token, sender_id,
+                     f"🎨 اللون: {chosen}\n"
+                     f"الحالة: {_stock_phrase(avail)}\n\n"
+                     f"كم الكمية التي تريدها؟ اكتب رقماً 👇")
+            db.set_order_flow(sender_id, shop_id, "await_qty", code=fcode, color=chosen, size="")
+            return True
         lines = [f"🎨 اللون: {chosen}", "", "📐 القياسات المتوفرة بهذا اللون:"]
         for s in sizes:
             lines.append(f"  • {s['size']}")
@@ -1777,6 +2157,26 @@ def handle_instagram_message(sender_id: str, recipient_id: str, text: str) -> No
                                     "أهلاً وسهلاً 👋\nأرسل كود السلعة التي تريد الاستفسار عنها.")
         return
 
+    # ── هل الزبون بمنتصف جلسة "أريد التنسيقة كلها"؟ (أولوية قبل أي شي ثاني) ──
+    if _process_outfit_bulk_flow(sender_id, send_account_id, ig_token, shop_id, text_stripped):
+        return
+
+    # ── طلب التنسيقة كاملة؟ ──
+    if text_stripped in _OUTFIT_BULK_PHRASES:
+        if _start_outfit_bulk_order(send_account_id, ig_token, sender_id, shop_id):
+            return
+        _send_ig(send_account_id, ig_token, sender_id,
+                 "ما عندي تنسيقة معروضة لك حالياً — أرسل كود التنسيقة أول.")
+        return
+
+    # ── كود تنسيقة؟ (يُفحص قبل كود السلعة العادي — نفس نمط الكود XX-XXXX) ──
+    _m_outfit_code = _RE_PRODUCT.search(text_up)
+    _outfit_candidate = _m_outfit_code.group(1) if _m_outfit_code else None
+    _outfit = db.get_outfit(_outfit_candidate) if _outfit_candidate else None
+    if _outfit is not None and _outfit["shop_id"] == shop_id:
+        _send_outfit_items(send_account_id, ig_token, sender_id, shop_id, _outfit_candidate)
+        return
+
     # ── تدفق الطلب التفاعلي (لون → قياس → كمية → بيانات) للسلع ذات المخزون ──
     # أولاً: هل الرسالة كود سلعة؟ لنجلب السلعة إن وُجدت.
     _m_code = _RE_PRODUCT.search(text_up)
@@ -1947,6 +2347,17 @@ def _ig_event():
                 sender_id    = msg_event.get("sender",    {}).get("id", "—")
                 recipient_id = msg_event.get("recipient", {}).get("id", "—")
                 text = msg.get("text")
+                # هل هذي رسالة "رد" (Reply) على رسالة قطعة من تنسيقة أرسلناها سابقاً؟
+                reply_mid = (msg.get("reply_to") or {}).get("mid")
+                if reply_mid:
+                    item = db.get_item_by_mid(reply_mid)
+                    if item and item.get("customer_ig") == sender_id:
+                        logging.warning(
+                            "[IG-REPLY] الزبون %s ردّ على قطعة %s من تنسيقة",
+                            sender_id, item["product_code"]
+                        )
+                        handle_instagram_message(sender_id, recipient_id, item["product_code"])
+                        continue
                 if text:
                     logging.warning("[IG] رسالة من %s إلى %s: %s", sender_id, recipient_id, text)
                     handle_instagram_message(sender_id, recipient_id, text)
